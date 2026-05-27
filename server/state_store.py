@@ -23,6 +23,7 @@ class StateRecord:
     state_token: str
     item_id: str
     env_profile: str
+    header: str
     header_hash: str
     path: Path
     created_at: datetime
@@ -69,6 +70,7 @@ class StateStore:
         *,
         item_id: str,
         env_profile: str,
+        header: str = "",
         header_hash: str,
     ) -> str:
         source_path = Path(path)
@@ -85,6 +87,7 @@ class StateStore:
             state_token=state_token,
             item_id=item_id,
             env_profile=env_profile,
+            header=header,
             header_hash=header_hash,
             path=target_path,
             created_at=now,
@@ -104,6 +107,7 @@ class StateStore:
             state_token=record.state_token,
             item_id=record.item_id,
             env_profile=record.env_profile,
+            header=record.header,
             header_hash=record.header_hash,
             path=record.path,
             created_at=record.created_at,
@@ -119,6 +123,7 @@ class StateStore:
             child_path,
             item_id=parent.item_id,
             env_profile=parent.env_profile,
+            header=parent.header,
             header_hash=parent.header_hash,
         )
 

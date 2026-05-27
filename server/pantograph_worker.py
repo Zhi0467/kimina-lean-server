@@ -126,6 +126,9 @@ class PantographWorker:
         if close is not None:
             close()
 
+    def set_timeout_seconds(self, timeout_seconds: int) -> None:
+        self._server.timeout = timeout_seconds
+
     async def aclose(self) -> None:
         proc = getattr(self._server, "proc", None)
         if proc is None:

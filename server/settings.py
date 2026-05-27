@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     max_repl_uses: int = -1
     max_repl_mem: int = 12
     max_wait: int = 60
+    max_pantograph_workers: int = max_repls
+    pantograph_buffer_limit: int = 2_000_000
 
     init_repls: dict[str, int] = {}
 

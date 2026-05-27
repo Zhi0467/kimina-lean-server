@@ -24,6 +24,7 @@ def _test_client(tmp_path: Path) -> TestClient:
     settings.environment = Environment.prod
     settings.init_repls = {}
     settings.state_store_dir = tmp_path / "state-store"
+    settings.max_pantograph_workers = 1
     return TestClient(create_app(settings))
 
 
@@ -34,6 +35,7 @@ async def test_cleanup_endpoint_deletes_by_item_id_unit(tmp_path: Path) -> None:
         _write_state(tmp_path / "root.bin", b"root"),
         item_id="theorem_42:a0",
         env_profile="env",
+        header="import Init",
         header_hash="header",
     )
     state_path = store.resolve(token).path
@@ -58,6 +60,7 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
             _write_state(tmp_path / "root.bin", b"root"),
             item_id="theorem_42:a0",
             env_profile="env",
+            header="import Init",
             header_hash="header",
         )
         state_path = store.resolve(token).path
@@ -78,25 +81,63 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
         assert store.stats().state_count == 0
 
 
-def test_exec_create_and_step_routes_validate_before_501_e2e(tmp_path: Path) -> None:
+def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> None:
     with _test_client(tmp_path) as client:
         create_response = client.post(
             "/exec/create_states",
             json={
-                "env_profile": "lean4.29.1_mathlib_x",
+                "env_profile": "lean_init_test",
                 "items": [
                     {
                         "item_id": "theorem_42:a0",
-                        "code": "theorem t : True := by\n  sorry",
+                        "code": "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+                        "timeout_ms": 30000,
                     }
                 ],
             },
         )
-        assert create_response.status_code == 501
-        assert create_response.json()["detail"] == (
-            "Pantograph create_states is not implemented yet"
-        )
+        assert create_response.status_code == 200
+        create_payload = create_response.json()
+        assert create_payload["items"][0]["status"] == "open"
+        state = create_payload["items"][0]["states"][0]
+        assert state["state_token"].startswith("st_")
+        assert state["goals"] == ["n : Nat\n⊢ n + 0 = n"]
 
+        step_response = client.post(
+            "/exec/step_batch",
+            json={
+                "items": [
+                    {
+                        "node_id": "theorem_42:a0:n0",
+                        "state_token": state["state_token"],
+                        "tactics": ["simp", "rw [Nat.add_comm]", "bad_tactic"],
+                        "timeout_ms": 30000,
+                    }
+                ]
+            },
+        )
+        assert step_response.status_code == 200
+        step_item = step_response.json()["items"][0]
+        assert step_item["node_id"] == "theorem_42:a0:n0"
+        assert [result["status"] for result in step_item["results"]] == [
+            "complete",
+            "open",
+            "error",
+        ]
+        assert step_item["results"][1]["state_token"].startswith("st_")
+        assert step_item["results"][1]["goals"] == ["n : Nat\n⊢ 0 + n = n"]
+        assert step_item["results"][2]["messages"]
+
+        cleanup_response = client.post(
+            "/exec/cleanup",
+            json={"item_ids": ["theorem_42:a0"]},
+        )
+        assert cleanup_response.status_code == 200
+        assert cleanup_response.json()["deleted_items"][0]["deleted_states"] == 2
+
+
+def test_exec_routes_validate_and_report_invalid_tokens_e2e(tmp_path: Path) -> None:
+    with _test_client(tmp_path) as client:
         invalid_create_response = client.post(
             "/exec/create_states",
             json={
@@ -121,9 +162,9 @@ def test_exec_create_and_step_routes_validate_before_501_e2e(tmp_path: Path) -> 
                 ]
             },
         )
-        assert step_response.status_code == 501
-        assert step_response.json()["detail"] == (
-            "Pantograph step_batch is not implemented yet"
+        assert step_response.status_code == 200
+        assert step_response.json()["items"][0]["results"][0]["status"] == (
+            "invalid_state_token"
         )
 
         invalid_step_response = client.post(

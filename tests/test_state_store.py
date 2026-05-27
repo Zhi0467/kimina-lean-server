@@ -27,6 +27,7 @@ def test_put_moves_file_and_records_metadata(tmp_path: Path) -> None:
         source,
         item_id="theorem_42:a0",
         env_profile="lean4.29.1_mathlib_x",
+        header="import Mathlib",
         header_hash="abc123",
     )
 
@@ -36,6 +37,7 @@ def test_put_moves_file_and_records_metadata(tmp_path: Path) -> None:
     record = store.resolve(token)
     assert record.item_id == "theorem_42:a0"
     assert record.env_profile == "lean4.29.1_mathlib_x"
+    assert record.header == "import Mathlib"
     assert record.header_hash == "abc123"
     assert record.path == tmp_path / "store" / "st_root.bin"
     assert record.path.read_bytes() == b"root-state"
@@ -76,6 +78,7 @@ def test_create_child_inherits_parent_metadata(tmp_path: Path) -> None:
         _write_state(tmp_path / "parent.bin", b"parent"),
         item_id="theorem_42:a0",
         env_profile="lean4.29.1_mathlib_x",
+        header="import Mathlib",
         header_hash="abc123",
     )
 
@@ -84,6 +87,7 @@ def test_create_child_inherits_parent_metadata(tmp_path: Path) -> None:
 
     assert child_record.item_id == "theorem_42:a0"
     assert child_record.env_profile == "lean4.29.1_mathlib_x"
+    assert child_record.header == "import Mathlib"
     assert child_record.header_hash == "abc123"
     assert child_record.path.read_bytes() == b"child"
     assert store.stats().state_count == 2
@@ -154,6 +158,7 @@ def test_state_store_search_lifecycle_e2e(tmp_path: Path) -> None:
         _write_state(tmp_path / "root.bin", b"root"),
         item_id="theorem_42:a0",
         env_profile="lean4.29.1_mathlib_x",
+        header="import Mathlib",
         header_hash="abc123",
     )
     child_token = store.create_child(
@@ -166,6 +171,7 @@ def test_state_store_search_lifecycle_e2e(tmp_path: Path) -> None:
     assert root_record.path.exists()
     assert child_record.path.exists()
     assert child_record.item_id == root_record.item_id
+    assert child_record.header == root_record.header
 
     deleted = store.delete_by_item_id("theorem_42:a0")
 

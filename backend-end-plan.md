@@ -288,6 +288,7 @@ Metadata:
   "state_token": "st_tS4m1A9uH0bC2WgY9eZp",
   "item_id": "theorem_42:a0",
   "env_profile": "lean4.29.1_mathlib_5e932f97",
+  "header": "import Mathlib",
   "header_hash": "a3f9...",
   "path": "/tmp/leanfoundry-state/st_tS4m1A9uH0bC2WgY9eZp.bin",
   "created_at": "...",
@@ -299,7 +300,7 @@ Metadata:
 Required operations:
 
 ```python
-put(path, *, item_id, env_profile, header_hash) -> state_token
+put(path, *, item_id, env_profile, header, header_hash) -> state_token
 resolve(state_token) -> StateRecord
 create_child(parent_token, child_path) -> state_token
 delete_by_item_id(item_id) -> DeleteStats
@@ -607,7 +608,10 @@ passing.
 
 These are engineering details, not architecture blockers:
 
-1. Exact Pantograph dependency form: PyPI pin vs git commit pin.
+1. Pantograph is not available as the needed PyPI pin in this environment.
+   Use the git dependency pinned to
+   `stanford-centaur/PyPantograph@ffa7f243824d2762825abddb1e9f6e939ede761f`,
+   which reports Pantograph `0.3.15`.
 2. State-store directory default on macOS vs Linux (`/tmp` vs `/dev/shm`).
 3. Whether to keep a separate `pantograph_manager.py` permanently or refactor
    Kimina's manager into a generic worker-pool abstraction after M5.

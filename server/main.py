@@ -11,6 +11,7 @@ from .__version__ import __version__
 from .db import db
 from .logger import setup_logging
 from .manager import Manager
+from .pantograph_manager import PantographManager
 from .routers.backward import router as backward_router
 from .routers.check import router as check_router
 from .routers.exec import router as exec_router
@@ -54,6 +55,11 @@ def create_app(settings: Settings) -> FastAPI:
             settings.state_store_dir,
             ttl_seconds=settings.state_ttl_seconds,
         )
+        app.state.pantograph_manager = PantographManager(
+            max_workers=settings.max_pantograph_workers,
+            project_path=settings.project_dir,
+            buffer_limit=settings.pantograph_buffer_limit,
+        )
         await app.state.manager.initialize_repls()
 
         if settings.environment == Environment.dev:
@@ -75,6 +81,7 @@ def create_app(settings: Settings) -> FastAPI:
 
         yield
 
+        await app.state.pantograph_manager.cleanup()
         await app.state.manager.cleanup()
         await db.disconnect()
 
