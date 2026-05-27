@@ -130,6 +130,7 @@ class StateStore:
             size_bytes=record.size_bytes,
         )
         self._records[state_token] = updated
+        self._write_metadata(updated)
         return updated
 
     def create_child(self, parent_token: str, child_path: Path) -> str:
@@ -289,13 +290,12 @@ async def run_state_gc(
 ) -> None:
     """Periodically reclaim expired states until cancelled.
 
-    Runs :meth:`StateStore.gc_expired` off the event loop so its blocking
-    filesystem work does not stall request handling.
+    Keeps StateStore access serialized on the event loop.
     """
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            stats = await asyncio.to_thread(store.gc_expired)
+            stats = store.gc_expired()
         except Exception:
             logger.exception("State store GC sweep failed")
             continue

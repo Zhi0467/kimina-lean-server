@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from server.state_store import StateStore, StateTokenNotFound
+from server.state_store import (
+    DeleteStats,
+    StateStore,
+    StateTokenNotFound,
+    run_state_gc,
+)
 
 
 def _write_state(path: Path, data: bytes = b"state") -> Path:
@@ -172,6 +180,36 @@ def test_records_survive_a_restart(tmp_path: Path) -> None:
     assert reloaded.delete_by_item_id("theorem_42:a0").deleted_states == 1
 
 
+def test_resolve_persists_access_time_for_restart_gc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_access = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    second_access = first_access + timedelta(seconds=9)
+    after_restart = first_access + timedelta(seconds=12)
+    root = tmp_path / "store"
+
+    store = StateStore(root, ttl_seconds=10, token_factory=_token_factory("st_root"))
+    now = first_access
+    monkeypatch.setattr(store, "_now", lambda: now)
+    token = store.put(
+        _write_state(tmp_path / "root.bin", b"root-state"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    now = second_access
+    store.resolve(token)
+
+    reloaded = StateStore(root, ttl_seconds=10)
+    monkeypatch.setattr(reloaded, "_now", lambda: after_restart)
+    deleted = reloaded.gc_expired()
+
+    assert deleted.deleted_states == 0
+    assert reloaded.resolve(token).path.exists()
+
+
 def test_gc_sweeps_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import os
 
@@ -198,6 +236,29 @@ def test_gc_sweeps_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert deleted.deleted_states == 2  # tracked "live" + orphan scratch file
     assert deleted.deleted_bytes == len(b"live") + len(b"orphan")
     assert store.stats().state_count == 0
+
+
+@pytest.mark.asyncio
+async def test_run_state_gc_runs_on_event_loop_thread() -> None:
+    loop_thread = threading.get_ident()
+    gc_thread_ids: list[int] = []
+    gc_ran = asyncio.Event()
+
+    class FakeStore:
+        def gc_expired(self) -> DeleteStats:
+            gc_thread_ids.append(threading.get_ident())
+            gc_ran.set()
+            return DeleteStats(deleted_states=0, deleted_bytes=0)
+
+    task = asyncio.create_task(
+        run_state_gc(cast(StateStore, FakeStore()), interval_seconds=0.001)
+    )
+    await asyncio.wait_for(gc_ran.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert gc_thread_ids == [loop_thread]
 
 
 def test_state_store_search_lifecycle_e2e(tmp_path: Path) -> None:
