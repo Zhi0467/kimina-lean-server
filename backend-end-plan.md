@@ -311,6 +311,32 @@ stats() -> StateStoreStats
 State tokens are immutable. Stepping a token never overwrites it. Each
 successful incomplete tactic creates a new token.
 
+Current saved-state safety nets:
+
+- `/exec/cleanup` deletes every state for an `item_id` when the SearchEngine
+  ends that graph search.
+- TTL GC deletes expired tracked states.
+- The persisted sidecar index lets the backend rehydrate tokens after restart
+  and delete old states from previous server processes.
+- Orphan sweeping deletes stale scratch/state files that were never promoted
+  into the index.
+
+This prevents completed, abandoned, or crashed searches from leaking forever,
+but it is still coarse during an active search. Today the backend stores every
+open child state returned by `goal_save` until either `item_id` cleanup or TTL
+GC removes it. In a 100-step linear proof search, that can mean 100 saved
+intermediate state files even though only the current frontier state may still
+be useful. The backend cannot safely infer which graph nodes are obsolete; that
+knowledge lives in the SearchEngine. For v0, active-search state pruning is
+therefore a SearchEngine policy issue plus a future backend protocol decision.
+The backend-owned safety net still missing is a storage-budget GC cap, e.g.
+`max_state_store_bytes` with least-recently-accessed eviction.
+
+Pantograph process GC is different from saved-state cleanup. `goal_save` writes
+a durable `.bin` file that backs a `state_token`; Pantograph `gc_async()` should
+only delete no-longer-referenced in-process Lean/Pantograph goal states inside
+one worker. It must not delete the saved `.bin` files owned by `StateStore`.
+
 ## Implementation In This Repo
 
 Proposed files:
@@ -445,6 +471,20 @@ Release:
 4. If worker is exhausted or over memory limit, close instead of returning it.
 
 No in-request fanout policy belongs in the manager.
+
+Implemented manager behavior so far:
+
+- Pool-size eviction in `get_worker`: if no compatible idle worker exists and
+  the pool is full, evict the oldest idle worker and start a compatible one.
+- Dead-worker eviction on route return: if a Pantograph timeout/crash leaves
+  the subprocess dead, destroy it instead of returning it to `_free`.
+
+Missing manager release behavior:
+
+- Pantograph in-process GC after each leased item.
+- Use-count recycling via `max_pantograph_worker_uses`.
+- Optional RSS cap as a later defensive check, not the primary cleanup
+  mechanism.
 
 ## SearchEngine / EnvClient Boundary
 
@@ -593,6 +633,48 @@ Add `server/pantograph_manager.py` and replace HTTP 501 responses:
 
 Run targeted tests first, then keep existing `/check` and `/verify` tests
 passing.
+
+### Step 6: Pantograph Worker Lifecycle Hygiene
+
+This is the next implementation chunk.
+
+Goal: do not recycle stale Pantograph in-process state forever.
+
+Concrete changes:
+
+- Add `PantographWorker.gc()` / `agc()` that calls `server.gc_async()`.
+- In the route return path, for a live worker:
+  1. run Pantograph GC;
+  2. if GC fails, destroy the worker;
+  3. otherwise release the worker back to the manager.
+- Add `max_pantograph_worker_uses` setting, defaulting to disabled (`-1`) or a
+  conservative finite value after local tests.
+- Track `use_count` on `PantographWorkerLease`.
+- In `PantographManager.release_worker`, increment use count and close the
+  worker instead of returning it to `_free` once it is exhausted.
+
+Tests:
+
+- Real Pantograph test: after saving an open child state, worker GC runs and
+  the saved child state can still be loaded/stepped later from disk.
+- Route/manager unit test: healthy worker runs GC and is released.
+- Route/manager unit test: GC failure destroys the worker.
+- Manager unit test: exhausted worker closes instead of entering `_free`.
+- Existing `/exec/create_states -> /exec/step_batch -> /exec/cleanup` e2e path
+  still passes.
+
+Non-goal for this chunk: deleting saved `StateStore` tokens during an active
+search. That is separate storage/frontier policy work.
+
+### Step 7: StateStore Storage-Budget Safety Net
+
+After worker lifecycle hygiene, add the missing backend-owned storage cap:
+
+- Add `max_state_store_bytes` setting.
+- Extend StateStore GC to evict least-recently-accessed records until total
+  tracked bytes are under the cap.
+- Treat TTL and max-bytes GC as last-resort backend safety nets. They should
+  protect the node, not decide proof-search graph policy.
 
 ## Non-Goals For v0
 
