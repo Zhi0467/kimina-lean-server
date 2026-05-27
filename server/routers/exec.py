@@ -199,6 +199,8 @@ async def _return_worker(
     A Pantograph command timeout or crash leaves the worker's subprocess dead
     (``proc is None``); recycling it would poison every later request routed to
     the same env/header. Such workers are destroyed so the pool starts fresh.
+    Reclaiming server-side state via ``agc`` can itself time out and kill the
+    worker, so a failed sweep also destroys the lease.
     """
     if lease is None:
         return

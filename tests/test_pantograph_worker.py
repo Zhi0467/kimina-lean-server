@@ -78,6 +78,63 @@ async def test_pantograph_gc_preserves_saved_state_files(
     assert resumed[0].status == "complete"
 
 
+async def test_agc_frees_states_without_explicit_gc_collect(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    import gc
+
+    # Disable the cyclic collector so only refcounting can free objects. If the
+    # deletion queue still fills, agc() needs no explicit gc.collect().
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        created = await pantograph_worker.create_states_from_code(
+            "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+            state_dir=tmp_path,
+        )
+        await pantograph_worker.step_state_with_tactics(
+            created.states[0].path,
+            ["rw [Nat.add_comm]"],
+            state_dir=tmp_path,
+        )
+
+        assert pantograph_worker._server.to_remove_goal_states  # populated by refcount
+
+        await pantograph_worker.agc()
+
+        assert pantograph_worker._server.to_remove_goal_states == []
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+async def test_state_saved_by_one_worker_loads_in_another(tmp_path: Path) -> None:
+    worker_a = await PantographWorker.create(
+        imports=["Init"], timeout_seconds=30, buffer_limit=2_000_000
+    )
+    worker_b = await PantographWorker.create(
+        imports=["Init"], timeout_seconds=30, buffer_limit=2_000_000
+    )
+    try:
+        created = await worker_a.create_states_from_code(
+            "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+            state_dir=tmp_path,
+        )
+        assert created.status == "open"
+
+        # A different subprocess loads worker A's saved state and finishes it.
+        results = await worker_b.step_state_with_tactics(
+            created.states[0].path,
+            ["simp"],
+            state_dir=tmp_path,
+        )
+        assert results[0].status == "complete"
+    finally:
+        await worker_a.aclose()
+        await worker_b.aclose()
+
+
 async def test_pantograph_worker_normalizes_complete_and_error_code(
     pantograph_worker: PantographWorker,
     tmp_path: Path,

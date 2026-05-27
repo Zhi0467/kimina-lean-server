@@ -45,6 +45,7 @@ class _FakeManager:
 class _FakeWorker:
     alive: bool
     gc_error: Exception | None = None
+    die_after_gc: bool = False
     gc_calls: int = 0
 
     def is_alive(self) -> bool:
@@ -54,6 +55,8 @@ class _FakeWorker:
         self.gc_calls += 1
         if self.gc_error is not None:
             raise self.gc_error
+        if self.die_after_gc:
+            self.alive = False
 
 
 @dataclass
@@ -86,10 +89,17 @@ async def test_return_worker_gc_releases_healthy_destroys_dead() -> None:
     assert manager.destroyed == [dead, gc_failed]
     assert manager.released == [healthy]
 
+    died_after_gc_worker = _FakeWorker(alive=True, die_after_gc=True)
+    died_after_gc = _FakeLease(worker=died_after_gc_worker)
+    await _return_worker(cast(Any, manager), cast(Any, died_after_gc))
+    assert died_after_gc_worker.gc_calls == 1
+    assert manager.destroyed == [dead, gc_failed, died_after_gc]
+    assert manager.released == [healthy]
+
     # A missing lease (worker never acquired) is a no-op.
     await _return_worker(cast(Any, manager), None)
     assert manager.released == [healthy]
-    assert manager.destroyed == [dead, gc_failed]
+    assert manager.destroyed == [dead, gc_failed, died_after_gc]
 
 
 @pytest.mark.asyncio

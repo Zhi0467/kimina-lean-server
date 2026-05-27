@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,7 +139,9 @@ class PantographWorker:
             close()
 
     async def agc(self) -> None:
-        gc.collect()
+        # GoalState.__del__ enqueues freed server-side states for deletion as
+        # soon as the request's locals are released by refcounting, so an
+        # explicit (process-global, blocking) gc.collect() is unnecessary here.
         await self._server.gc_async()
 
     def set_timeout_seconds(self, timeout_seconds: int) -> None:

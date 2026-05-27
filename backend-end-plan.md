@@ -25,10 +25,14 @@ logic, graph termination, and proof rendering live outside this repo.
    - It is not a file path, not pretty proof-state text, and not a Pantograph
      process-local state id.
 
-4. `item_id` is the search graph owner id.
-   - Canonical case: one proof search per theorem, e.g. `item_id="theorem_42"`.
-   - Parallel attempts use distinct item ids, e.g. `theorem_42:a0`,
-     `theorem_42:a1`, or `theorem_42:<nonce>`.
+4. `item_id` is the search attempt owner id.
+   - The backend treats it as an opaque ownership label.
+   - The trainer/SearchEngine constructs it from caller-owned concepts such as
+     `run_id`, `problem_id`, and attempt number.
+   - Canonical case: one proof search attempt per theorem, e.g.
+     `item_id="run_123:theorem_42:attempt_1"`.
+   - Parallel or resumed attempts use distinct item ids, e.g.
+     `run_123:theorem_42:attempt_2` or `run_123:theorem_42:<nonce>`.
    - Every state token created during that graph search is tagged with the
      same `item_id`.
    - Cleanup deletes all saved states for completed `item_id`s.
@@ -489,13 +493,13 @@ That belongs in the SearchEngine / SLIME custom rollout.
 Expected caller flow:
 
 ```text
-SearchEngine starts item_id = theorem_42:a0
+SearchEngine starts item_id = run_123:theorem_42:attempt_1
   -> send Lean code block to /exec/create_states
   -> receive root state_token(s)
   -> select graph node n7
   -> sample tactics via PolicyClient / model endpoint
   -> EnvClient sends one /exec/step_batch item:
-       node_id = theorem_42:a0:n7
+       node_id = run_123:theorem_42:attempt_1:n7
        state_token = ...
        tactics = [...]
   -> backend returns per-tactic outcomes and child tokens
@@ -511,6 +515,61 @@ await env.step(node_id=node.id, state_token=node.state_token, tactics=tactics)
 
 Internally the client may wait a few milliseconds or until `max_items_per_batch`
 to form one HTTP request.
+
+## Training Attempt Lifecycle And Resume
+
+The backend does not own training progress or resume policy. It only owns
+executable proof-state blobs keyed by opaque `state_token`s and grouped by
+opaque `item_id`s.
+
+Responsibility split:
+
+- Trainer owns `run_id`, `problem_id`, attempt numbering, completed/pending
+  problem sets, and the resume policy.
+- SearchEngine / EnvClient constructs backend `item_id`s from those caller-owned
+  ids and passes them to `/exec/create_states`.
+- Backend stores every root and child state for that `item_id`, resolves tokens
+  during `/exec/step_batch`, and deletes all states for an `item_id` only when
+  `/exec/cleanup` is called.
+- Backend TTL and storage-budget GC are safety nets for forgotten or crashed
+  work. They are not the primary training lifecycle mechanism.
+
+v0 resume is at the problem/search-start boundary, not the partial graph
+boundary. If the trainer crashes while problems are in flight, resume should:
+
+1. Load the trainer checkpoint.
+2. Treat incomplete attempt ids as abandoned, e.g.
+   `run_123:theorem_42:attempt_1`.
+3. Start fresh attempts for unfinished problems, e.g.
+   `run_123:theorem_42:attempt_2`.
+4. Call `/exec/cleanup` for abandoned attempt ids when the resumed trainer is
+   ready to discard their saved states.
+5. Call `/exec/create_states` for the new attempt ids and restart search from
+   root proof states.
+
+This intentionally discards partial search graphs. It avoids requiring the
+trainer to checkpoint every `node_id -> state_token` mapping, parent edge,
+tactic, model score, visit count, and frontier priority. It also avoids asking
+the backend to infer whether states are abandoned; the backend cannot safely
+know that because the trainer may crash while the backend stays up.
+
+Cleanup timing:
+
+- On normal problem completion, SearchEngine calls `/exec/cleanup` for the
+  current attempt `item_id`.
+- On trainer resume, Trainer/SearchEngine calls `/exec/cleanup` for stale
+  attempt ids that it chooses not to resume.
+- On trainer crash while the backend stays alive, old states remain until the
+  trainer resumes and cleans them, or until backend TTL/storage GC reclaims
+  them.
+- Backend startup/shutdown should not eagerly delete all saved states. Doing so
+  would break any future fast-resume mode that intentionally checkpoints live
+  `state_token`s.
+
+Future full-graph resume can be added above the backend by checkpointing
+`node_id -> state_token` plus enough lineage, such as theorem code and
+`tactic_path`, to rebuild a missing token by replay. That is a SearchEngine and
+trainer checkpointing feature, not a backend storage policy.
 
 ## Profiling Baseline
 
