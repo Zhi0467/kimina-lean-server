@@ -7,11 +7,20 @@ if [ -f .env ]; then
   set +a
 fi
 
-LEAN_SERVER_LEAN_VERSION="${LEAN_SERVER_LEAN_VERSION:-v4.26.0}"
-REPL_REPO_URL="${REPL_REPO_URL:-https://github.com/leanprover-community/repl.git}"
-REPL_BRANCH="${REPL_BRANCH:-$LEAN_SERVER_LEAN_VERSION}"
+# Lean toolchain is pinned to v4.29.1 because the Pantograph backend (PyPantograph
+# 0.3.15) ships a `pantograph-repl` built for leanprover/lean4:v4.29.1 and can only
+# load a mathlib4 project on the same toolchain. mathlib4 has no v4.29.1 tag, so the
+# matching project is the `bump_to_v4.29.1` branch (HEAD 5e932f97).
+LEAN_SERVER_LEAN_VERSION="${LEAN_SERVER_LEAN_VERSION:-v4.29.1}"
 MATHLIB_REPO_URL="${MATHLIB_REPO_URL:-https://github.com/leanprover-community/mathlib4.git}"
-MATHLIB_BRANCH="${MATHLIB_BRANCH:-$LEAN_SERVER_LEAN_VERSION}"
+MATHLIB_BRANCH="${MATHLIB_BRANCH:-bump_to_v4.29.1}"
+
+# The Lean REPL is only used by the legacy `/api/check` path; the Pantograph `/exec`
+# path bundles its own binary and does not need it. It is skipped by default because
+# `repl` has no v4.29.1 release. Set SETUP_REPL=1 to build it (latest is v4.29.0).
+SETUP_REPL="${SETUP_REPL:-0}"
+REPL_REPO_URL="${REPL_REPO_URL:-https://github.com/leanprover-community/repl.git}"
+REPL_BRANCH="${REPL_BRANCH:-v4.29.0}"
 
 command -v curl >/dev/null 2>&1 || { echo >&2 "curl is required"; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo >&2 "git is required";  exit 1; }
@@ -59,16 +68,20 @@ install_repo() {
   popd
 }
 
-install_repo repl "$REPL_REPO_URL" "$REPL_BRANCH" false
+if [ "$SETUP_REPL" = "1" ]; then
+  install_repo repl "$REPL_REPO_URL" "$REPL_BRANCH" false
 
-# Cherry-pick EOL flush commit for v4.9.0 and under.
-if version_lte "$REPL_BRANCH" "v4.9.0"; then
-  echo "Applying commit 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4 for $REPL_BRANCH (<=v4.9.0)..."
-  pushd repl
-    git fetch origin 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4
-    git cherry-pick 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4
-    lake build
-  popd
+  # Cherry-pick EOL flush commit for v4.9.0 and under.
+  if version_lte "$REPL_BRANCH" "v4.9.0"; then
+    echo "Applying commit 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4 for $REPL_BRANCH (<=v4.9.0)..."
+    pushd repl
+      git fetch origin 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4
+      git cherry-pick 4fc1e6d1dda170e8f0a6b698dd5f7e17a9cf52b4
+      lake build
+    popd
+  fi
+else
+  echo "Skipping repl build (SETUP_REPL=0). Set SETUP_REPL=1 for the legacy /api/check path."
 fi
 
 install_repo mathlib4 "$MATHLIB_REPO_URL" "$MATHLIB_BRANCH" true

@@ -9,6 +9,9 @@ __pycache__/
 .venv
 dist/
 
+# Benchmark workload cache and results
+.cache/
+
 # Lean dependencies
 mathlib4/
 repl/
