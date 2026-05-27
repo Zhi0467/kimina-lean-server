@@ -148,6 +148,58 @@ def test_gc_expired_deletes_stale_states(tmp_path: Path, monkeypatch: pytest.Mon
         store.resolve(token)
 
 
+def test_records_survive_a_restart(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    store = StateStore(root, token_factory=_token_factory("st_root"))
+    token = store.put(
+        _write_state(tmp_path / "root.bin", b"root-state"),
+        item_id="theorem_42:a0",
+        env_profile="lean4.29.1_mathlib_x",
+        header="import Mathlib",
+        header_hash="abc123",
+    )
+
+    # A fresh store over the same directory mimics a server restart.
+    reloaded = StateStore(root)
+
+    record = reloaded.resolve(token)
+    assert record.item_id == "theorem_42:a0"
+    assert record.env_profile == "lean4.29.1_mathlib_x"
+    assert record.header == "import Mathlib"
+    assert record.header_hash == "abc123"
+    assert record.path.read_bytes() == b"root-state"
+    assert reloaded.stats().state_count == 1
+    assert reloaded.delete_by_item_id("theorem_42:a0").deleted_states == 1
+
+
+def test_gc_sweeps_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    root = tmp_path / "store"
+    store = StateStore(root, ttl_seconds=10, token_factory=_token_factory("st_live"))
+    monkeypatch.setattr(store, "_now", lambda: now)
+    store.put(
+        _write_state(tmp_path / "live.bin", b"live"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    # An untracked scratch file left behind by a crashed worker.
+    orphan = _write_state(root / "pg_orphan.bin", b"orphan")
+    stale = (now - timedelta(seconds=60)).timestamp()
+    os.utime(orphan, (stale, stale))
+
+    now = now + timedelta(seconds=11)
+    deleted = store.gc_expired()
+
+    assert not orphan.exists()
+    assert deleted.deleted_states == 2  # tracked "live" + orphan scratch file
+    assert deleted.deleted_bytes == len(b"live") + len(b"orphan")
+    assert store.stats().state_count == 0
+
+
 def test_state_store_search_lifecycle_e2e(tmp_path: Path) -> None:
     store = StateStore(
         tmp_path / "state-store",

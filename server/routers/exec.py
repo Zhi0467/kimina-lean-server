@@ -9,6 +9,7 @@ from ..auth import require_key
 from ..pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
+    PantographWorkerLease,
     header_hash,
 )
 from ..schemas_exec import (
@@ -98,8 +99,7 @@ async def create_states(
                 messages=[str(exc)],
             )
         finally:
-            if lease is not None:
-                await pantograph_manager.release_worker(lease)
+            await _return_worker(pantograph_manager, lease)
 
     results = await asyncio.gather(*(create_one(item) for item in request.items))
     return CreateStatesResponse(items=list(results))
@@ -180,8 +180,7 @@ async def step_batch(
                 ],
             )
         finally:
-            if lease is not None:
-                await pantograph_manager.release_worker(lease)
+            await _return_worker(pantograph_manager, lease)
 
     results = await asyncio.gather(*(step_one(item) for item in request.items))
     return StepBatchResponse(items=list(results))
@@ -189,6 +188,24 @@ async def step_batch(
 
 def _timeout_seconds(timeout_ms: int) -> int:
     return max((timeout_ms + 999) // 1000, 1)
+
+
+async def _return_worker(
+    pantograph_manager: PantographManager,
+    lease: PantographWorkerLease | None,
+) -> None:
+    """Release a healthy worker back to the pool, or destroy a dead one.
+
+    A Pantograph command timeout or crash leaves the worker's subprocess dead
+    (``proc is None``); recycling it would poison every later request routed to
+    the same env/header. Such workers are destroyed so the pool starts fresh.
+    """
+    if lease is None:
+        return
+    if lease.worker.is_alive():
+        await pantograph_manager.release_worker(lease)
+    else:
+        await pantograph_manager.destroy_worker(lease)
 
 
 @router.post(

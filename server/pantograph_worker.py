@@ -121,6 +121,18 @@ class PantographWorker:
             )
         return results
 
+    def is_alive(self) -> bool:
+        """Whether the underlying Pantograph subprocess is still usable.
+
+        PyPantograph nulls ``server.proc`` (via ``_close``) whenever a command
+        times out or its output cannot be decoded, so a missing/exited ``proc``
+        means the worker is dead and must not be recycled into the pool.
+        """
+        proc = getattr(self._server, "proc", None)
+        if proc is None:
+            return False
+        return proc.returncode is None
+
     def close(self) -> None:
         close = getattr(self._server, "_close", None)
         if close is not None:

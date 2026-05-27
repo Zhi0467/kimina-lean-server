@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -7,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.main import create_app
-from server.routers.exec import cleanup as cleanup_endpoint
+from server.routers.exec import _return_worker, cleanup as cleanup_endpoint
 from server.schemas_exec import CleanupRequest
 from server.settings import Environment, Settings
 from server.state_store import StateStore
@@ -26,6 +27,53 @@ def _test_client(tmp_path: Path) -> TestClient:
     settings.state_store_dir = tmp_path / "state-store"
     settings.max_pantograph_workers = 1
     return TestClient(create_app(settings))
+
+
+class _FakeManager:
+    def __init__(self) -> None:
+        self.released: list[Any] = []
+        self.destroyed: list[Any] = []
+
+    async def release_worker(self, lease: Any) -> None:
+        self.released.append(lease)
+
+    async def destroy_worker(self, lease: Any) -> None:
+        self.destroyed.append(lease)
+
+
+@dataclass
+class _FakeLease:
+    alive: bool
+
+    @property
+    def worker(self) -> Any:
+        lease = self
+
+        class _Worker:
+            def is_alive(self) -> bool:
+                return lease.alive
+
+        return _Worker()
+
+
+@pytest.mark.asyncio
+async def test_return_worker_releases_healthy_destroys_dead() -> None:
+    manager = _FakeManager()
+
+    healthy = _FakeLease(alive=True)
+    await _return_worker(cast(Any, manager), cast(Any, healthy))
+    assert manager.released == [healthy]
+    assert manager.destroyed == []
+
+    dead = _FakeLease(alive=False)
+    await _return_worker(cast(Any, manager), cast(Any, dead))
+    assert manager.destroyed == [dead]
+    assert manager.released == [healthy]
+
+    # A missing lease (worker never acquired) is a no-op.
+    await _return_worker(cast(Any, manager), None)
+    assert manager.released == [healthy]
+    assert manager.destroyed == [dead]
 
 
 @pytest.mark.asyncio

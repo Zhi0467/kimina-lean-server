@@ -1,6 +1,7 @@
+import asyncio
 import textwrap
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
@@ -17,7 +18,7 @@ from .routers.check import router as check_router
 from .routers.exec import router as exec_router
 from .routers.health import router as health_router
 from .settings import Environment, Settings
-from .state_store import StateStore
+from .state_store import StateStore, run_state_gc
 
 
 def no_sort(self: GenerateJsonSchema, value: Any, parent_key: Any = None) -> Any:
@@ -60,6 +61,12 @@ def create_app(settings: Settings) -> FastAPI:
             project_path=settings.project_dir,
             buffer_limit=settings.pantograph_buffer_limit,
         )
+        app.state.state_gc_task = asyncio.create_task(
+            run_state_gc(
+                app.state.state_store,
+                interval_seconds=settings.state_gc_interval_seconds,
+            )
+        )
         await app.state.manager.initialize_repls()
 
         if settings.environment == Environment.dev:
@@ -81,6 +88,9 @@ def create_app(settings: Settings) -> FastAPI:
 
         yield
 
+        app.state.state_gc_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await app.state.state_gc_task
         await app.state.pantograph_manager.cleanup()
         await app.state.manager.cleanup()
         await db.disconnect()

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import secrets
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from loguru import logger
 
 
 class StateStoreError(Exception):
@@ -44,6 +48,15 @@ class StateStoreStats:
 
 
 class StateStore:
+    """Filesystem-backed store for serialized proof states.
+
+    Each state is a ``{token}.bin`` file in ``root_dir`` accompanied by a
+    ``{token}.json`` sidecar holding its metadata. The in-memory index is
+    rebuilt from those sidecars on construction, so state tokens survive a
+    server restart and ``gc_expired`` can reclaim files left behind by a
+    previous run.
+    """
+
     def __init__(
         self,
         root_dir: Path,
@@ -59,6 +72,7 @@ class StateStore:
         self._records: dict[str, StateRecord] = {}
         self._tokens_by_item_id: dict[str, set[str]] = {}
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        self._rehydrate()
 
     @staticmethod
     def _default_token() -> str:
@@ -78,7 +92,7 @@ class StateStore:
             raise FileNotFoundError(source_path)
 
         state_token = self._new_token()
-        target_path = self.root_dir / f"{state_token}.bin"
+        target_path = self._state_path(state_token)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source_path), target_path)
 
@@ -96,6 +110,7 @@ class StateStore:
         )
         self._records[state_token] = record
         self._tokens_by_item_id.setdefault(item_id, set()).add(state_token)
+        self._write_metadata(record)
         return state_token
 
     def resolve(self, state_token: str) -> StateRecord:
@@ -138,7 +153,12 @@ class StateStore:
             for token, record in self._records.items()
             if record.last_accessed_at < cutoff
         ]
-        return self._delete_tokens(expired)
+        tracked = self._delete_tokens(expired)
+        orphans = self._sweep_orphans(cutoff)
+        return DeleteStats(
+            deleted_states=tracked.deleted_states + orphans.deleted_states,
+            deleted_bytes=tracked.deleted_bytes + orphans.deleted_bytes,
+        )
 
     def stats(self) -> StateStoreStats:
         return StateStoreStats(
@@ -166,14 +186,122 @@ class StateStore:
                 item_tokens.discard(token)
                 if not item_tokens:
                     self._tokens_by_item_id.pop(record.item_id, None)
-            try:
-                record.path.unlink()
-            except FileNotFoundError:
-                pass
+            record.path.unlink(missing_ok=True)
+            self._metadata_path(token).unlink(missing_ok=True)
             deleted_states += 1
             deleted_bytes += record.size_bytes
         return DeleteStats(deleted_states=deleted_states, deleted_bytes=deleted_bytes)
 
+    def _sweep_orphans(self, cutoff: datetime) -> DeleteStats:
+        """Delete untracked files older than ``cutoff``.
+
+        Catches state files from a crashed run whose sidecar never loaded,
+        lone sidecars, and the worker's ``pg_*.bin`` scratch files that were
+        never promoted via :meth:`put`.
+        """
+        deleted_states = 0
+        deleted_bytes = 0
+        cutoff_ts = cutoff.timestamp()
+        for path in self.root_dir.glob("*"):
+            if not path.is_file() or path.stem in self._records:
+                continue
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            if stat.st_mtime >= cutoff_ts:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            if path.suffix == ".bin":
+                deleted_states += 1
+                deleted_bytes += stat.st_size
+        return DeleteStats(deleted_states=deleted_states, deleted_bytes=deleted_bytes)
+
+    def _rehydrate(self) -> None:
+        for metadata_path in self.root_dir.glob("*.json"):
+            record = self._read_metadata(metadata_path)
+            if record is None:
+                continue
+            self._records[record.state_token] = record
+            self._tokens_by_item_id.setdefault(record.item_id, set()).add(
+                record.state_token
+            )
+        if self._records:
+            logger.info("State store rehydrated {} state(s)", len(self._records))
+
+    def _read_metadata(self, metadata_path: Path) -> StateRecord | None:
+        try:
+            raw = json.loads(metadata_path.read_text())
+            token = raw["state_token"]
+            bin_path = self._state_path(token)
+            if not bin_path.is_file():
+                metadata_path.unlink(missing_ok=True)
+                return None
+            return StateRecord(
+                state_token=token,
+                item_id=raw["item_id"],
+                env_profile=raw["env_profile"],
+                header=raw.get("header", ""),
+                header_hash=raw["header_hash"],
+                path=bin_path,
+                created_at=datetime.fromisoformat(raw["created_at"]),
+                last_accessed_at=datetime.fromisoformat(raw["last_accessed_at"]),
+                size_bytes=int(raw["size_bytes"]),
+            )
+        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            logger.warning("Ignoring unreadable state metadata: {}", metadata_path)
+            return None
+
+    def _write_metadata(self, record: StateRecord) -> None:
+        self._metadata_path(record.state_token).write_text(
+            json.dumps(
+                {
+                    "state_token": record.state_token,
+                    "item_id": record.item_id,
+                    "env_profile": record.env_profile,
+                    "header": record.header,
+                    "header_hash": record.header_hash,
+                    "created_at": record.created_at.isoformat(),
+                    "last_accessed_at": record.last_accessed_at.isoformat(),
+                    "size_bytes": record.size_bytes,
+                }
+            )
+        )
+
+    def _state_path(self, state_token: str) -> Path:
+        return self.root_dir / f"{state_token}.bin"
+
+    def _metadata_path(self, state_token: str) -> Path:
+        return self.root_dir / f"{state_token}.json"
+
     @staticmethod
     def _now() -> datetime:
         return datetime.now(timezone.utc)
+
+
+async def run_state_gc(
+    store: StateStore,
+    *,
+    interval_seconds: float,
+) -> None:
+    """Periodically reclaim expired states until cancelled.
+
+    Runs :meth:`StateStore.gc_expired` off the event loop so its blocking
+    filesystem work does not stall request handling.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            stats = await asyncio.to_thread(store.gc_expired)
+        except Exception:
+            logger.exception("State store GC sweep failed")
+            continue
+        if stats.deleted_states:
+            logger.info(
+                "State store GC reclaimed {} state(s), {} byte(s)",
+                stats.deleted_states,
+                stats.deleted_bytes,
+            )

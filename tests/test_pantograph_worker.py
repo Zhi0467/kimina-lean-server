@@ -68,3 +68,11 @@ async def test_pantograph_worker_normalizes_complete_and_error_code(
     )
     assert errored.status == "error"
     assert errored.messages
+
+
+async def test_is_alive_tracks_subprocess_state(
+    pantograph_worker: PantographWorker,
+) -> None:
+    assert pantograph_worker.is_alive() is True
+    await pantograph_worker.aclose()
+    assert pantograph_worker.is_alive() is False

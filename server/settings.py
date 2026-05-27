@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     state_store_dir: Path = BASE_DIR / ".leanfoundry-state"
     state_ttl_seconds: int = 3600
+    state_gc_interval_seconds: int = 300
 
     database_url: str | None = None
 
