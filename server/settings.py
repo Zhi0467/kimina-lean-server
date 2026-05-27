@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     init_repls: dict[str, int] = {}
 
+    state_store_dir: Path = BASE_DIR / ".leanfoundry-state"
+    state_ttl_seconds: int = 3600
+
     database_url: str | None = None
 
     model_config = SettingsConfigDict(

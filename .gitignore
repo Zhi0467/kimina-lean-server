@@ -12,6 +12,7 @@ dist/
 # Lean dependencies
 mathlib4/
 repl/
+.leanfoundry-state/
 
 # Environment variables
 .env

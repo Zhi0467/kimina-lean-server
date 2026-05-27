@@ -13,8 +13,10 @@ from .logger import setup_logging
 from .manager import Manager
 from .routers.backward import router as backward_router
 from .routers.check import router as check_router
+from .routers.exec import router as exec_router
 from .routers.health import router as health_router
 from .settings import Environment, Settings
+from .state_store import StateStore
 
 
 def no_sort(self: GenerateJsonSchema, value: Any, parent_key: Any = None) -> Any:
@@ -48,6 +50,10 @@ def create_app(settings: Settings) -> FastAPI:
             init_repls=settings.init_repls,
         )
         app.state.manager = manager
+        app.state.state_store = StateStore(
+            settings.state_store_dir,
+            ttl_seconds=settings.state_ttl_seconds,
+        )
         await app.state.manager.initialize_repls()
 
         if settings.environment == Environment.dev:
@@ -97,6 +103,10 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(
         backward_router,
         tags=["backward"],
+    )
+    app.include_router(
+        exec_router,
+        tags=["exec"],
     )
     return app
 
