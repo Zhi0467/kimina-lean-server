@@ -1,6 +1,6 @@
-import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import httpx
@@ -11,7 +11,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-from tqdm.asyncio import tqdm_asyncio
+from tqdm import tqdm
 
 from .base import BaseKimina
 from .models import CheckRequest, CheckResponse, Infotree, ReplResponse, Snippet
@@ -20,7 +20,7 @@ from .utils import build_log, find_code_column, find_id_column
 logger = logging.getLogger("kimina-client")
 
 
-class AsyncKiminaClient(BaseKimina):
+class KiminaClient(BaseKimina):
     def __init__(
         self,
         api_url: str | None = None,
@@ -36,12 +36,8 @@ class AsyncKiminaClient(BaseKimina):
             http_timeout=http_timeout,
             n_retries=n_retries,
         )
-        self.session = httpx.AsyncClient(
-            headers=self.headers,
-            timeout=httpx.Timeout(self.http_timeout, read=self.http_timeout),
-        )
 
-    async def check(
+    def check(
         self,
         snips: str | list[str] | Snippet | list[Snippet],
         timeout: int = 60,
@@ -61,23 +57,29 @@ class AsyncKiminaClient(BaseKimina):
         batches = [
             snippets[i : i + batch_size] for i in range(0, len(snippets), batch_size)
         ]
-        sem = asyncio.Semaphore(max_workers)
-
-        async def worker(batch: list[Snippet]) -> CheckResponse:
-            async with sem:
-                return await self.api_check(
-                    batch, timeout, debug, reuse, infotree, True
+        results: list[CheckResponse] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self.api_check, batch, timeout, debug, reuse, infotree, True
+                ): batch
+                for batch in batches
+            }
+            iterator = (
+                tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc="Batches",
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [elapsed: {elapsed}, remaining: {remaining}]",
                 )
+                if show_progress
+                else as_completed(futures)
+            )
+            for future in iterator:
+                results.append(future.result())
+        return CheckResponse.merge(results)
 
-        tasks = [worker(batch) for batch in batches]
-        if show_progress:
-            results = await tqdm_asyncio.gather(*tasks)  # type: ignore
-
-        else:
-            results = await asyncio.gather(*tasks)
-        return CheckResponse.merge(results)  # type: ignore
-
-    async def api_check(
+    def api_check(
         self,
         snippets: list[Snippet],
         timeout: int = 30,
@@ -86,8 +88,14 @@ class AsyncKiminaClient(BaseKimina):
         infotree: Infotree | None = None,
         safe: bool = False,
     ) -> CheckResponse:
+        """
+        Makes a POST request to /api/check with provided arguments.
+
+        Returns a `CheckResponse`.
+        """
         try:
             url = self.build_url("/api/check")
+
             payload = CheckRequest(
                 snippets=snippets,
                 timeout=timeout,
@@ -96,7 +104,7 @@ class AsyncKiminaClient(BaseKimina):
                 infotree=infotree,
             ).model_dump()
 
-            resp = await self._query(url, payload)
+            resp = self._query(url, payload)
             return self.handle(resp, CheckResponse)
         except Exception as e:
             if safe:
@@ -107,47 +115,62 @@ class AsyncKiminaClient(BaseKimina):
                 )
             raise e
 
-    async def _query(
+    def _query(
         self, url: str, payload: dict[str, Any] | None = None, method: str = "POST"
     ) -> Any:
+        """
+        Sends a `method` request to `url` with `payload` as body/params.
+        A new `httpx.Client` is created for each request for thread-safety.
+        Use AsyncClient for more efficient concurrent requests (TCP connection reuse/pooling).
+        """
+
         @retry(
             stop=stop_after_attempt(self.n_retries),
             wait=wait_exponential(multiplier=1, min=1, max=10),
             before_sleep=before_sleep_log(logger, logging.ERROR),
         )
-        async def run_method() -> Any:
+        def run_method() -> Any:
             try:
-                if method.upper() == "POST":
-                    response = await self.session.post(url, json=payload)
-                elif method.upper() == "GET":
-                    response = await self.session.get(url, params=payload)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
-                response.raise_for_status()  # Ensure 2xx, otherwise retry
+                with httpx.Client(
+                    headers=self.headers,
+                    timeout=httpx.Timeout(self.http_timeout, read=self.http_timeout),
+                ) as client:
+                    if method.upper() == "POST":
+                        response = client.post(url, json=payload)
+                    elif method.upper() == "GET":
+                        response = client.get(url, params=payload)
+                    else:
+                        raise ValueError(f"Unsupported method: {method}")
+                    response.raise_for_status()  # Ensure 2xx, otherwise retry
             except httpx.HTTPError as e:
                 logger.error(f"Error posting to {url}: {e}")
                 raise e
 
             try:
-                return response.json()
+                return response.json()  # Ensure JSON, otherwise retry
             except ValueError:
                 logger.error(f"Server returned non-JSON: {response.text}")
                 raise ValueError("Invalid response from server: not a valid JSON")
 
         try:
-            return await run_method()
+            return run_method()
         except RetryError:
             raise RuntimeError(f"Request failed after {self.n_retries} retries")
 
-    async def health(self) -> Any:
+    def health(self) -> Any:
+        """
+        Checks server's healthy.
+        """
         url = self.build_url("/health")
-        return await self._query(url, method="GET")
+        resp = self._query(url, method="GET")
+        return resp  # TODO: create status object to cast automatically
 
-    async def test(self) -> None:
+    def test(self) -> None:
+        """
+        Tests with `#check Nat`.
+        """
         logger.info("Testing with `#check Nat`...")
-        response = (
-            (await self.check("#check Nat", show_progress=False)).results[0].response
-        )
+        response = self.check("#check Nat", show_progress=False).results[0].response
         assert response is not None, "Response should not be None"
         assert response.get("messages", None) == [
             {
@@ -159,7 +182,7 @@ class AsyncKiminaClient(BaseKimina):
         ]
         logger.info("Test passed!")
 
-    async def run_benchmark(
+    def run_benchmark(
         self,
         dataset_name: str = "Goedel-LM/Lean-workbook-proofs",
         split: str = "train",
@@ -192,7 +215,7 @@ class AsyncKiminaClient(BaseKimina):
         except Exception as e:
             raise ImportError(
                 "The 'datasets' library is required for run_benchmark.\n"
-                "Install it with 'pip install datasets'."
+                "Install project dependencies with 'uv sync --dev'."
             ) from e
 
         builder = load_dataset_builder(dataset_name)
@@ -231,7 +254,7 @@ class AsyncKiminaClient(BaseKimina):
         ]
 
         start_time = time.time()
-        check_response = await self.check(
+        check_response = self.check(
             snips=snips,
             timeout=timeout,
             reuse=reuse,
@@ -242,6 +265,3 @@ class AsyncKiminaClient(BaseKimina):
         elapsed_time = time.time() - start_time
 
         check_response.analyze(elapsed_time)
-
-    async def close(self) -> None:
-        await self.session.aclose()

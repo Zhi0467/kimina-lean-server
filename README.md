@@ -7,14 +7,16 @@
 
 <p align="center">
     <a href="https://projectnumina.ai/"><img alt="Project Numina" src="images/logo_projectNumina_light.png" style="height:20px; width:auto; vertical-align:middle; border-radius:4px;"></a>
-    <a href="https://pypi.org/project/kimina-client" rel="nofollow"><img alt="PyPI version" src="https://img.shields.io/pypi/v/kimina-client.svg" style="max-width:100%;"></a>
     <a href="https://github.com/project-numina/kimina-lean-server/actions/workflows/ci.yaml" rel="nofollow"><img alt="CI" src="https://github.com/project-numina/kimina-lean-server/actions/workflows/ci.yaml/badge.svg" style="max-width:100%;"></a>
 </p>
 
-This project serves the [Lean REPL](https://github.com/leanprover-community/repl) using FastAPI. 
-It supports parallelization to check Lean 4 proofs at scale. 
+This local development checkout serves the
+[Lean REPL](https://github.com/leanprover-community/repl) using FastAPI.
+It supports parallelization to check Lean 4 proofs at scale.
 
-A Python SDK simplifies interaction with the server's API.
+Both the server code and local Python client live in this repository and are
+run directly from source with `uv`. The server is not installed as a packaged
+Python distribution in this development workflow.
 
 Read the [Technical Report](./Technical_Report.pdf) for more details.
 
@@ -32,21 +34,24 @@ This repository contains the source code for:
 
 ## Server
 
-From source with `requirements.txt` (option to use `uv`, see [Contributing](#contributing)):
+From a source checkout, use `uv` for the Python environment and run the
+server directly from the repository root:
 ```sh
-cp .env.template .env # Optional
+cp .env.template .env
+uv sync --dev
+uv run prisma generate
 bash setup.sh # Installs Lean, repl and mathlib4
-pip install -r requirements.txt
-pip install .
-prisma generate
-python -m server
+uv run python -m server
 ```
 
 > [!NOTE]
-> Make sure `mathlib4` and `repl` exist in the workspace directory before launching the server from source.
+> In this development checkout, the server is not treated as an installed
+> Python package. It is run from source with `uv run python -m server`.
+> Make sure `mathlib4` and `repl` exist in the workspace directory before
+> launching the server.
 
 
-Or with `docker compose up` (pulls from Docker Hub).  
+Or with `docker compose up`.
 Equivalent run command is:
 ```sh
 docker run -d \
@@ -73,7 +78,7 @@ Test it works with a request:
 
 ```sh
 curl --request POST \
-  --url http://localhost/verify \
+  --url http://localhost:8000/verify \
   --header 'Content-Type: application/json' \
   --data '{
     "codes": [
@@ -90,19 +95,13 @@ Or use the client below.
 
 ## Client
 
-From [PyPI](https://test.pypi.org/project/kimina-client/):
-```sh
-pip install kimina-client
-```
-
-Example use:
+In this development checkout, `kimina_client/` is a top-level source
+directory. Use it through `uv run` from the repository root:
 ```python
 from kimina_client import KiminaClient
 client = KiminaClient() # Defaults to "http://localhost:8000", no API key
 client.check("#check Nat")
 ```
-
-Or from source with `pip install -e .`
 
 ## ⚙️ Environment Variables
 
@@ -169,7 +168,7 @@ The benchmarks were run on a machine with **10 CPUs** (MacBook Pro M2) with the 
 The dataset is available at [`Goedel-LM/Lean-workbook-proofs`](https://huggingface.co/datasets/Goedel-LM/Lean-workbook-proofs). 
 
 To reproduce:
-- Server command: `python -m server` (no `.env` file)
+- Server command: `uv run python -m server` (no `.env` file)
 - Client (from ipython / Jupyter notebook or `python -m asyncio`):
 ```python
 from kimina_client import AsyncKiminaClient
@@ -209,27 +208,13 @@ bash setup.sh
 
 Run tests with (reads your `LEAN_SERVER_API_KEY` so make sure that line is commented):
 ```sh
-pytest
+uv run pytest
 
 # Performance tests on first rows of Goedel (ensures less than 10s average check time per proof)
-pytest -m perfs
+uv run pytest -m perfs
 
 # Tests on 100 first Goedel rows to validate API backward-compatibility
-pytest -m match # Use -n auto to use all cores.
-```
-
-To release the client:
-- bump the version in `pyproject.toml` and run `uv lock`
-- run the "Publish to PyPI" action on Github
-
-To release the server:
-- bump the version in `compose-prod.yaml` and in Dockerfile
-- run the "Deploy to Google Cloud" action on Github
-- run the "Publish to Docker" action on Github (doesn't exist yet)
-
-If you change dependencies (uv.lock), make sure to generate `requirements.txt` again with:
-```sh
-uv export --extra server --no-dev --no-emit-project --no-hashes > requirements.txt
+uv run pytest -m match # Use -n auto to use all cores.
 ```
 
 ## License
@@ -249,4 +234,3 @@ You are free to use, modify, and distribute this software with proper attributio
       url={https://arxiv.org/abs/2504.21230}, 
 }
 ```
-

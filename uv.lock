@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version < '3.11'",
@@ -961,39 +961,33 @@ wheels = [
 ]
 
 [[package]]
-name = "kimina-client"
-version = "0.2.1"
-source = { editable = "." }
+name = "kimina-lean-server-dev"
+version = "0.0.0"
+source = { virtual = "." }
 dependencies = [
     { name = "colorama" },
     { name = "datasets" },
+    { name = "fastapi" },
+    { name = "google-cloud-logging" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pip" },
+    { name = "prisma" },
+    { name = "psutil" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "rich" },
     { name = "tabulate" },
     { name = "tenacity" },
-]
-
-[package.optional-dependencies]
-server = [
-    { name = "fastapi" },
-    { name = "google-cloud-logging" },
-    { name = "prisma" },
-    { name = "psutil" },
-    { name = "rich" },
     { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "asgi-lifespan" },
-    { name = "datasets" },
     { name = "mypy" },
     { name = "pre-commit" },
-    { name = "pydantic-settings" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1007,30 +1001,27 @@ dev = [
 requires-dist = [
     { name = "colorama", specifier = ">=0.4.6" },
     { name = "datasets", specifier = ">=4.0.0" },
-    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115.13" },
-    { name = "google-cloud-logging", marker = "extra == 'server'", specifier = ">=3.12.1" },
+    { name = "fastapi", specifier = ">=0.115.13" },
+    { name = "google-cloud-logging", specifier = ">=3.12.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pip", specifier = ">=25.1.1" },
-    { name = "prisma", marker = "extra == 'server'", specifier = ">=0.15.0" },
-    { name = "psutil", marker = "extra == 'server'", specifier = ">=7.0.0" },
+    { name = "prisma", specifier = ">=0.15.0" },
+    { name = "psutil", specifier = ">=7.0.0" },
     { name = "pydantic-settings", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "requests", specifier = ">=2.31.0" },
-    { name = "rich", marker = "extra == 'server'", specifier = ">=14.0.0" },
+    { name = "rich", specifier = ">=14.0.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tenacity", specifier = ">=9.1.2" },
-    { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.34.3" },
+    { name = "uvicorn", specifier = ">=0.34.3" },
 ]
-provides-extras = ["server"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
-    { name = "datasets", specifier = ">=4.0.0" },
     { name = "mypy", specifier = ">=1.16.1" },
     { name = "pre-commit", specifier = ">=4.2.0" },
-    { name = "pydantic-settings", specifier = ">=2.10.0" },
     { name = "pyright", specifier = ">=1.1.402" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },

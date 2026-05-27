@@ -41,16 +41,14 @@ WORKDIR /root/kimina-lean-server
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 COPY server server
-COPY client client
+COPY kimina_client kimina_client
 COPY prisma prisma
-COPY pyproject.toml uv.lock README-client.md ./
+COPY pyproject.toml uv.lock README.md ./
 
-RUN uv export --extra server --no-dev --no-emit-project > requirements.txt \
- && pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir -e . \
- && prisma generate
+RUN uv sync --frozen --no-dev \
+ && uv run prisma generate
 
 EXPOSE ${LEAN_SERVER_PORT}
 
 
-CMD ["python", "-m", "server"]
+CMD ["uv", "run", "python", "-m", "server"]
