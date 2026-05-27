@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     max_repl_mem: int = 12
     max_wait: int = 60
     max_pantograph_workers: int = max_repls
+    max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
 
     init_repls: dict[str, int] = {}
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     state_store_dir: Path = BASE_DIR / ".leanfoundry-state"
     state_ttl_seconds: int = 3600
     state_gc_interval_seconds: int = 300
+    max_state_store_bytes: int = -1
 
     database_url: str | None = None
 

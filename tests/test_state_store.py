@@ -156,6 +156,55 @@ def test_gc_expired_deletes_stale_states(tmp_path: Path, monkeypatch: pytest.Mon
         store.resolve(token)
 
 
+def test_gc_enforces_state_store_byte_budget_by_lru(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = StateStore(
+        tmp_path / "store",
+        ttl_seconds=3600,
+        max_bytes=5,
+        token_factory=_token_factory("st_old", "st_mid", "st_new"),
+    )
+    monkeypatch.setattr(store, "_now", lambda: now)
+    old = store.put(
+        _write_state(tmp_path / "old.bin", b"aaa"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    now = now + timedelta(seconds=1)
+    mid = store.put(
+        _write_state(tmp_path / "mid.bin", b"bbb"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    now = now + timedelta(seconds=1)
+    new = store.put(
+        _write_state(tmp_path / "new.bin", b"cc"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    now = now + timedelta(seconds=1)
+    store.resolve(old)
+
+    deleted = store.gc_expired()
+
+    assert deleted.deleted_states == 1
+    assert deleted.deleted_bytes == len(b"bbb")
+    assert store.stats().total_bytes == len(b"aaa") + len(b"cc")
+    assert not (tmp_path / "store" / f"{mid}.bin").exists()
+    assert not (tmp_path / "store" / f"{mid}.json").exists()
+    assert store.resolve(old).path.exists()
+    assert store.resolve(new).path.exists()
+
+
 def test_records_survive_a_restart(tmp_path: Path) -> None:
     root = tmp_path / "store"
     store = StateStore(root, token_factory=_token_factory("st_root"))

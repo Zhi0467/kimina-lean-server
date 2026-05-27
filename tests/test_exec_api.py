@@ -42,38 +42,54 @@ class _FakeManager:
 
 
 @dataclass
-class _FakeLease:
+class _FakeWorker:
     alive: bool
+    gc_error: Exception | None = None
+    gc_calls: int = 0
 
-    @property
-    def worker(self) -> Any:
-        lease = self
+    def is_alive(self) -> bool:
+        return self.alive
 
-        class _Worker:
-            def is_alive(self) -> bool:
-                return lease.alive
+    async def agc(self) -> None:
+        self.gc_calls += 1
+        if self.gc_error is not None:
+            raise self.gc_error
 
-        return _Worker()
+
+@dataclass
+class _FakeLease:
+    worker: _FakeWorker
 
 
 @pytest.mark.asyncio
-async def test_return_worker_releases_healthy_destroys_dead() -> None:
+async def test_return_worker_gc_releases_healthy_destroys_dead() -> None:
     manager = _FakeManager()
 
-    healthy = _FakeLease(alive=True)
+    healthy_worker = _FakeWorker(alive=True)
+    healthy = _FakeLease(worker=healthy_worker)
     await _return_worker(cast(Any, manager), cast(Any, healthy))
+    assert healthy_worker.gc_calls == 1
     assert manager.released == [healthy]
     assert manager.destroyed == []
 
-    dead = _FakeLease(alive=False)
+    dead_worker = _FakeWorker(alive=False)
+    dead = _FakeLease(worker=dead_worker)
     await _return_worker(cast(Any, manager), cast(Any, dead))
+    assert dead_worker.gc_calls == 0
     assert manager.destroyed == [dead]
+    assert manager.released == [healthy]
+
+    gc_failed_worker = _FakeWorker(alive=True, gc_error=RuntimeError("gc failed"))
+    gc_failed = _FakeLease(worker=gc_failed_worker)
+    await _return_worker(cast(Any, manager), cast(Any, gc_failed))
+    assert gc_failed_worker.gc_calls == 1
+    assert manager.destroyed == [dead, gc_failed]
     assert manager.released == [healthy]
 
     # A missing lease (worker never acquired) is a no-op.
     await _return_worker(cast(Any, manager), None)
     assert manager.released == [healthy]
-    assert manager.destroyed == [dead]
+    assert manager.destroyed == [dead, gc_failed]
 
 
 @pytest.mark.asyncio

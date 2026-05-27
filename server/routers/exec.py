@@ -202,6 +202,14 @@ async def _return_worker(
     """
     if lease is None:
         return
+    if not lease.worker.is_alive():
+        await pantograph_manager.destroy_worker(lease)
+        return
+    try:
+        await lease.worker.agc()
+    except Exception:
+        await pantograph_manager.destroy_worker(lease)
+        return
     if lease.worker.is_alive():
         await pantograph_manager.release_worker(lease)
     else:

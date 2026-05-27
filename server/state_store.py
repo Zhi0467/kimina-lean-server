@@ -62,12 +62,16 @@ class StateStore:
         root_dir: Path,
         *,
         ttl_seconds: int = 3600,
+        max_bytes: int = -1,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        if max_bytes < -1:
+            raise ValueError("max_bytes must be -1 or non-negative")
         self.root_dir = root_dir
         self.ttl = timedelta(seconds=ttl_seconds)
+        self.max_bytes = max_bytes
         self._token_factory = token_factory or self._default_token
         self._records: dict[str, StateRecord] = {}
         self._tokens_by_item_id: dict[str, set[str]] = {}
@@ -155,10 +159,17 @@ class StateStore:
             if record.last_accessed_at < cutoff
         ]
         tracked = self._delete_tokens(expired)
+        budget = self._gc_over_budget()
         orphans = self._sweep_orphans(cutoff)
         return DeleteStats(
-            deleted_states=tracked.deleted_states + orphans.deleted_states,
-            deleted_bytes=tracked.deleted_bytes + orphans.deleted_bytes,
+            deleted_states=(
+                tracked.deleted_states
+                + budget.deleted_states
+                + orphans.deleted_states
+            ),
+            deleted_bytes=(
+                tracked.deleted_bytes + budget.deleted_bytes + orphans.deleted_bytes
+            ),
         )
 
     def stats(self) -> StateStoreStats:
@@ -192,6 +203,26 @@ class StateStore:
             deleted_states += 1
             deleted_bytes += record.size_bytes
         return DeleteStats(deleted_states=deleted_states, deleted_bytes=deleted_bytes)
+
+    def _gc_over_budget(self) -> DeleteStats:
+        if self.max_bytes < 0:
+            return DeleteStats(deleted_states=0, deleted_bytes=0)
+
+        total_bytes = self.stats().total_bytes
+        if total_bytes <= self.max_bytes:
+            return DeleteStats(deleted_states=0, deleted_bytes=0)
+
+        tokens_to_delete: list[str] = []
+        records = sorted(
+            self._records.values(),
+            key=lambda record: (record.last_accessed_at, record.created_at),
+        )
+        for record in records:
+            tokens_to_delete.append(record.state_token)
+            total_bytes -= record.size_bytes
+            if total_bytes <= self.max_bytes:
+                break
+        return self._delete_tokens(tokens_to_delete)
 
     def _sweep_orphans(self, cutoff: datetime) -> DeleteStats:
         """Delete untracked files older than ``cutoff``.

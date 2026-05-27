@@ -103,3 +103,26 @@ async def test_pantograph_manager_times_out_when_all_workers_are_busy() -> None:
         await manager.get_worker(env_profile="env", header="", timeout=0.001)
 
     await manager.cleanup()
+
+
+async def test_pantograph_manager_closes_exhausted_worker_on_release() -> None:
+    factory = FakeWorkerFactory()
+    manager = PantographManager(
+        max_workers=1,
+        max_worker_uses=1,
+        worker_factory=factory,
+    )
+
+    first = await manager.get_worker(env_profile="env", header="", timeout=1)
+    await manager.release_worker(first)
+
+    assert first.use_count == 1
+    assert first.worker.closed
+
+    second = await manager.get_worker(env_profile="env", header="", timeout=1)
+
+    assert second is not first
+    assert len(factory.calls) == 2
+
+    await manager.release_worker(second)
+    await manager.cleanup()

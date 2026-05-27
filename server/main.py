@@ -55,11 +55,13 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.state_store = StateStore(
             settings.state_store_dir,
             ttl_seconds=settings.state_ttl_seconds,
+            max_bytes=settings.max_state_store_bytes,
         )
         app.state.pantograph_manager = PantographManager(
             max_workers=settings.max_pantograph_workers,
             project_path=settings.project_dir,
             buffer_limit=settings.pantograph_buffer_limit,
+            max_worker_uses=settings.max_pantograph_worker_uses,
         )
         app.state.state_gc_task = asyncio.create_task(
             run_state_gc(

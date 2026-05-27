@@ -32,6 +32,7 @@ class PantographWorkerLease:
     header: str
     header_hash: str
     last_used_at: datetime
+    use_count: int = 0
 
 
 class PantographManager:
@@ -41,13 +42,17 @@ class PantographManager:
         max_workers: int,
         project_path: Path | None = None,
         buffer_limit: int | None = 1_000_000,
+        max_worker_uses: int = -1,
         worker_factory: WorkerFactory | None = None,
     ) -> None:
         if max_workers <= 0:
             raise ValueError("max_workers must be positive")
+        if max_worker_uses < -1:
+            raise ValueError("max_worker_uses must be -1 or non-negative")
         self.max_workers = max_workers
         self.project_path = project_path
         self.buffer_limit = buffer_limit
+        self.max_worker_uses = max_worker_uses
         self._worker_factory = worker_factory or _create_pantograph_worker
 
         self._lock: asyncio.Lock | None = None
@@ -138,14 +143,28 @@ class PantographManager:
     async def release_worker(self, lease: PantographWorkerLease) -> None:
         self._ensure_lock()
         assert self._cond is not None
+        should_close = False
         async with self._cond:
             if lease not in self._busy:
                 logger.error("Attempted to release a Pantograph worker that is not busy")
                 return
             self._busy.remove(lease)
-            lease.last_used_at = datetime.now()
-            self._free.append(lease)
+            lease.use_count += 1
+            if self._is_exhausted(lease):
+                should_close = True
+            else:
+                lease.last_used_at = datetime.now()
+                self._free.append(lease)
             self._cond.notify(1)
+
+        if should_close:
+            logger.info("Pantograph worker exhausted; closing instead of recycling")
+            await _close_worker(lease.worker)
+
+    def _is_exhausted(self, lease: PantographWorkerLease) -> bool:
+        if self.max_worker_uses < 0:
+            return False
+        return lease.use_count >= self.max_worker_uses
 
     async def destroy_worker(self, lease: PantographWorkerLease) -> None:
         self._ensure_lock()

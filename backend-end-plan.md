@@ -202,32 +202,23 @@ Response:
         {
           "tactic": "simp",
           "status": "complete",
-          "messages": [],
-          "elapsed_ms": 41
+          "messages": []
         },
         {
           "tactic": "rw [Nat.add_comm]",
           "status": "open",
           "state_token": "st_G6z3h9Kp8n2E",
           "goals": ["⊢ 0 + n = n"],
-          "messages": [],
-          "elapsed_ms": 38
+          "messages": []
         },
         {
           "tactic": "omega",
           "status": "error",
-          "messages": ["omega could not close the goal"],
-          "elapsed_ms": 12
+          "messages": ["omega could not close the goal"]
         }
       ]
     }
-  ],
-  "server_metrics": {
-    "queue_wait_ms_p50": 3,
-    "queue_wait_ms_p95": 31,
-    "worker_utilization": 0.91,
-    "state_store_bytes": 123456789
-  }
+  ]
 }
 ```
 
@@ -316,21 +307,23 @@ Current saved-state safety nets:
 - `/exec/cleanup` deletes every state for an `item_id` when the SearchEngine
   ends that graph search.
 - TTL GC deletes expired tracked states.
+- Storage-budget GC, controlled by `max_state_store_bytes`, evicts
+  least-recently-accessed tracked states until the store is under the cap.
 - The persisted sidecar index lets the backend rehydrate tokens after restart
   and delete old states from previous server processes.
 - Orphan sweeping deletes stale scratch/state files that were never promoted
   into the index.
 
 This prevents completed, abandoned, or crashed searches from leaking forever,
-but it is still coarse during an active search. Today the backend stores every
-open child state returned by `goal_save` until either `item_id` cleanup or TTL
-GC removes it. In a 100-step linear proof search, that can mean 100 saved
-intermediate state files even though only the current frontier state may still
-be useful. The backend cannot safely infer which graph nodes are obsolete; that
-knowledge lives in the SearchEngine. For v0, active-search state pruning is
-therefore a SearchEngine policy issue plus a future backend protocol decision.
-The backend-owned safety net still missing is a storage-budget GC cap, e.g.
-`max_state_store_bytes` with least-recently-accessed eviction.
+and it also gives the node a hard disk/RAM-disk safety valve. It is still
+coarse during an active search. The backend stores every open child state
+returned by `goal_save` until explicit `item_id` cleanup, TTL GC, or
+storage-budget GC removes it. In a 100-step linear proof search, that can mean
+100 saved intermediate state files even though only the current frontier state
+may still be useful. The backend cannot safely infer which graph nodes are
+obsolete; that knowledge lives in the SearchEngine. For v0, active-search
+state pruning is therefore a SearchEngine policy issue plus a future backend
+protocol decision.
 
 Pantograph process GC is different from saved-state cleanup. `goal_save` writes
 a durable `.bin` file that backs a `state_token`; Pantograph `gc_async()` should
@@ -478,13 +471,15 @@ Implemented manager behavior so far:
   the pool is full, evict the oldest idle worker and start a compatible one.
 - Dead-worker eviction on route return: if a Pantograph timeout/crash leaves
   the subprocess dead, destroy it instead of returning it to `_free`.
-
-Missing manager release behavior:
-
 - Pantograph in-process GC after each leased item.
+- GC failure destroys the worker instead of returning it to `_free`.
 - Use-count recycling via `max_pantograph_worker_uses`.
-- Optional RSS cap as a later defensive check, not the primary cleanup
-  mechanism.
+
+Deferred manager release behavior:
+
+- Optional RSS cap as a later defensive check. It is not the primary cleanup
+  mechanism because saved proof-state files are owned by `StateStore`, not by
+  worker RSS.
 
 ## SearchEngine / EnvClient Boundary
 
@@ -636,7 +631,7 @@ passing.
 
 ### Step 6: Pantograph Worker Lifecycle Hygiene
 
-This is the next implementation chunk.
+Status: implemented.
 
 Goal: do not recycle stale Pantograph in-process state forever.
 
@@ -668,13 +663,15 @@ search. That is separate storage/frontier policy work.
 
 ### Step 7: StateStore Storage-Budget Safety Net
 
-After worker lifecycle hygiene, add the missing backend-owned storage cap:
+Status: implemented.
 
 - Add `max_state_store_bytes` setting.
 - Extend StateStore GC to evict least-recently-accessed records until total
   tracked bytes are under the cap.
 - Treat TTL and max-bytes GC as last-resort backend safety nets. They should
   protect the node, not decide proof-search graph policy.
+- Test that resolving a token refreshes its access time and budget GC evicts
+  the true least-recently-accessed state.
 
 ## Non-Goals For v0
 
