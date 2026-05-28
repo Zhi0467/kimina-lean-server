@@ -17,6 +17,7 @@ from examples.pantograph_benchmark.metrics import (
 from examples.pantograph_benchmark.mining import (
     ProofWorkload,
     build_candidate_tactics,
+    build_workload,
     distractor_pool,
     is_structured_proof,
     mine_row,
@@ -135,10 +136,14 @@ def test_state_store_usage_scopes_by_item_prefix(tmp_path: Path) -> None:
 
 def test_build_report_aggregates_throughput_and_status() -> None:
     collector = MetricsCollector()
+    collector.create_items = 2
     collector.created_states = 2
+    collector.step_items = 3
     collector.step_results = 4
+    collector.record_request("/exec/create_states", 1_000.0)
     collector.record_request("/exec/step_batch", 100.0)
     collector.record_request("/exec/step_batch", 200.0)
+    collector.record_request("/exec/cleanup", 50.0)
     collector.record_status("open")
     collector.record_status("complete")
 
@@ -151,11 +156,84 @@ def test_build_report_aggregates_throughput_and_status() -> None:
         state_store_before={"state_count": 0, "total_bytes": 0},
         state_store_after={"state_count": 0, "total_bytes": 0},
     )
-    assert report["request_count"] == 2
-    assert report["items_per_sec"] == 1.0
+    assert report["request_count"] == 4
+    assert report["create_items"] == 2
+    assert report["items_per_sec"] == 1.5
     assert report["tactics_per_sec"] == 2.0
     assert report["status_counts"] == {"open": 1, "complete": 1}
     assert report["cleanup"] == {"deleted_states": 2, "deleted_bytes": 512}
+    assert report["latency_by_endpoint_ms"] == {
+        "/exec/cleanup": {
+            "count": 1,
+            "p50": 50.0,
+            "p95": 50.0,
+            "p99": 50.0,
+            "max": 50.0,
+        },
+        "/exec/create_states": {
+            "count": 1,
+            "p50": 1000.0,
+            "p95": 1000.0,
+            "p99": 1000.0,
+            "max": 1000.0,
+        },
+        "/exec/step_batch": {
+            "count": 2,
+            "p50": 150.0,
+            "p95": 195.0,
+            "p99": 199.0,
+            "max": 200.0,
+        },
+    }
+
+
+def test_workload_cache_reuses_matching_metadata(tmp_path: Path) -> None:
+    cache_path = tmp_path / "workload.jsonl"
+    first = build_workload(
+        [("p1", MULTI_STEP)],
+        dataset_name="dataset-a",
+        split="train",
+        n_proofs=1,
+        seed=0,
+        max_rows_scanned=10,
+        cache_path=cache_path,
+    )
+    second = build_workload(
+        [("p2", ONE_SHOT)],
+        dataset_name="dataset-a",
+        split="train",
+        n_proofs=1,
+        seed=0,
+        max_rows_scanned=10,
+        cache_path=cache_path,
+    )
+
+    assert [w.problem_id for w in first] == ["p1"]
+    assert [w.problem_id for w in second] == ["p1"]
+
+
+def test_workload_cache_rejects_mismatched_metadata(tmp_path: Path) -> None:
+    cache_path = tmp_path / "workload.jsonl"
+    build_workload(
+        [("p1", MULTI_STEP)],
+        dataset_name="dataset-a",
+        split="train",
+        n_proofs=1,
+        seed=0,
+        max_rows_scanned=10,
+        cache_path=cache_path,
+    )
+    refreshed = build_workload(
+        [("p2", ONE_SHOT)],
+        dataset_name="dataset-b",
+        split="train",
+        n_proofs=1,
+        seed=0,
+        max_rows_scanned=10,
+        cache_path=cache_path,
+    )
+
+    assert [w.problem_id for w in refreshed] == ["p2"]
 
 
 def _workload() -> ProofWorkload:
@@ -223,6 +301,7 @@ async def test_run_replay_calls_create_step_cleanup_in_order() -> None:
     assert calls[-1] == "/exec/cleanup"
     assert totals.deleted_states == 3
     assert collector.created_states == 1
+    assert collector.step_items > 0
     assert collector.step_results > 0
 
 

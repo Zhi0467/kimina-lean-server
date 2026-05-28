@@ -91,6 +91,7 @@ async def _create_roots(
         {"item_id": item_id, "code": workload.root_code, "timeout_ms": config.timeout_ms}
         for item_id, workload in index.by_item_id.items()
     ]
+    collector.create_items += len(items)
     responses = await _fan_out(
         client,
         "/exec/create_states",
@@ -151,6 +152,7 @@ async def _step_once(
             }
         )
 
+    collector.step_items += len(items)
     responses = await _fan_out(
         client,
         "/exec/step_batch",

@@ -3,6 +3,23 @@ import sys
 from typing import Any
 
 from .async_client import AsyncKiminaClient
+from .exec_env import AsyncLeanExecBatcher, AsyncLeanExecEnv
+from .exec_models import (
+    ExecCleanupRequest,
+    ExecCleanupResponse,
+    ExecCleanupResult,
+    ExecCreateStateItem,
+    ExecCreateStatesRequest,
+    ExecCreateStatesResponse,
+    ExecCreateStatesResult,
+    ExecStateInfo,
+    ExecStatus,
+    ExecStepBatchItem,
+    ExecStepBatchRequest,
+    ExecStepBatchResponse,
+    ExecStepBatchResult,
+    ExecStepResult,
+)
 from .models import (
     BackwardResponse,
     CheckRequest,
@@ -28,6 +45,8 @@ from .sync_client import KiminaClient
 
 __all__ = [
     "AsyncKiminaClient",
+    "AsyncLeanExecBatcher",
+    "AsyncLeanExecEnv",
     "BackwardResponse",
     "ReplRequest",
     "ReplResponse",
@@ -40,6 +59,20 @@ __all__ = [
     "Error",
     "ExtendedCommandResponse",
     "ExtendedError",
+    "ExecCleanupRequest",
+    "ExecCleanupResponse",
+    "ExecCleanupResult",
+    "ExecCreateStateItem",
+    "ExecCreateStatesRequest",
+    "ExecCreateStatesResponse",
+    "ExecCreateStatesResult",
+    "ExecStateInfo",
+    "ExecStatus",
+    "ExecStepBatchItem",
+    "ExecStepBatchRequest",
+    "ExecStepBatchResponse",
+    "ExecStepBatchResult",
+    "ExecStepResult",
     "Infotree",
     "KiminaClient",
     "Message",

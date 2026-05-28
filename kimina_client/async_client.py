@@ -14,6 +14,16 @@ from tenacity import (
 from tqdm.asyncio import tqdm_asyncio
 
 from .base import BaseKimina
+from .exec_models import (
+    ExecCleanupRequest,
+    ExecCleanupResponse,
+    ExecCreateStateItem,
+    ExecCreateStatesRequest,
+    ExecCreateStatesResponse,
+    ExecStepBatchItem,
+    ExecStepBatchRequest,
+    ExecStepBatchResponse,
+)
 from .models import CheckRequest, CheckResponse, Infotree, ReplResponse, Snippet
 from .utils import build_log, find_code_column, find_id_column
 
@@ -40,6 +50,15 @@ class AsyncKiminaClient(BaseKimina):
             headers=self.headers,
             timeout=httpx.Timeout(self.http_timeout, read=self.http_timeout),
         )
+
+    async def __aenter__(self) -> "AsyncKiminaClient":
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self.session.aclose()
 
     async def check(
         self,
@@ -106,6 +125,34 @@ class AsyncKiminaClient(BaseKimina):
                     ],
                 )
             raise e
+
+    async def exec_create_states(
+        self,
+        env_profile: str,
+        items: list[ExecCreateStateItem],
+    ) -> ExecCreateStatesResponse:
+        url = self.build_url("/exec/create_states")
+        payload = ExecCreateStatesRequest(
+            env_profile=env_profile,
+            items=items,
+        ).model_dump()
+        resp = await self._query(url, payload)
+        return self.handle(resp, ExecCreateStatesResponse)
+
+    async def exec_step_batch(
+        self,
+        items: list[ExecStepBatchItem],
+    ) -> ExecStepBatchResponse:
+        url = self.build_url("/exec/step_batch")
+        payload = ExecStepBatchRequest(items=items).model_dump()
+        resp = await self._query(url, payload)
+        return self.handle(resp, ExecStepBatchResponse)
+
+    async def exec_cleanup(self, item_ids: list[str]) -> ExecCleanupResponse:
+        url = self.build_url("/exec/cleanup")
+        payload = ExecCleanupRequest(item_ids=item_ids).model_dump()
+        resp = await self._query(url, payload)
+        return self.handle(resp, ExecCleanupResponse)
 
     async def _query(
         self, url: str, payload: dict[str, Any] | None = None, method: str = "POST"

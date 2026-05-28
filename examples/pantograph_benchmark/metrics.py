@@ -23,7 +23,9 @@ class MetricsCollector:
 
     requests: list[RequestRecord] = field(default_factory=list)
     status_counts: Counter[str] = field(default_factory=Counter)
+    create_items: int = 0
     created_states: int = 0
+    step_items: int = 0
     step_results: int = 0
 
     def record_request(self, endpoint: str, elapsed_ms: float) -> None:
@@ -134,9 +136,11 @@ def build_report(
     return {
         "wall_seconds": round(wall_seconds, 3),
         "request_count": request_count,
+        "create_items": collector.create_items,
         "created_states": collector.created_states,
+        "step_items": collector.step_items,
         "step_results": collector.step_results,
-        "items_per_sec": round(collector.created_states / wall_seconds, 2)
+        "items_per_sec": round(collector.step_items / wall_seconds, 2)
         if wall_seconds > 0
         else 0.0,
         "tactics_per_sec": round(collector.step_results / wall_seconds, 2)
@@ -148,6 +152,7 @@ def build_report(
             "p99": round(percentile(latencies, 99), 1),
             "max": round(max(latencies), 1) if latencies else 0.0,
         },
+        "latency_by_endpoint_ms": _latency_by_endpoint(collector.requests),
         "status_counts": dict(collector.status_counts),
         "cleanup": {
             "deleted_states": cleanup_deleted_states,
@@ -161,6 +166,22 @@ def build_report(
             "before": state_store_before,
             "after": state_store_after,
         },
+    }
+
+
+def _latency_by_endpoint(records: list[RequestRecord]) -> dict[str, dict[str, float]]:
+    grouped: dict[str, list[float]] = {}
+    for record in records:
+        grouped.setdefault(record.endpoint, []).append(record.elapsed_ms)
+    return {
+        endpoint: {
+            "count": len(values),
+            "p50": round(percentile(values, 50), 1),
+            "p95": round(percentile(values, 95), 1),
+            "p99": round(percentile(values, 99), 1),
+            "max": round(max(values), 1),
+        }
+        for endpoint, values in sorted(grouped.items())
     }
 
 

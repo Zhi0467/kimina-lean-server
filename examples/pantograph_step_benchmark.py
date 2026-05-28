@@ -96,8 +96,11 @@ async def run(args: argparse.Namespace) -> dict[str, object]:
     max_rows = args.max_rows_scanned or args.n_proofs * 50
     workloads = build_workload(
         iter_dataset_rows(args.dataset_name, args.split, max_rows),
+        dataset_name=args.dataset_name,
+        split=args.split,
         n_proofs=args.n_proofs,
         seed=args.seed,
+        max_rows_scanned=max_rows,
         cache_path=args.workload_cache,
     )
     if not workloads:

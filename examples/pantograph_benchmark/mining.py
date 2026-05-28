@@ -23,6 +23,7 @@ LINE_COMMENT = re.compile(r"--[^\n]*")
 # Lines that signal a structured/focused proof we cannot replay as a linear tactic
 # chain (focus bullets, case arms, induction arms). Such rows are skipped.
 STRUCTURED_PREFIXES = ("·", "·", "case ", "next ", "| ", "{")
+MINING_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -159,8 +160,11 @@ def build_candidate_tactics(
 def build_workload(
     rows: Iterable[tuple[str, str]],
     *,
+    dataset_name: str,
+    split: str,
     n_proofs: int,
     seed: int,
+    max_rows_scanned: int | None,
     cache_path: Path | None = None,
 ) -> list[ProofWorkload]:
     """Mine up to ``n_proofs`` workloads from ``(problem_id, full_proof)`` rows.
@@ -168,8 +172,16 @@ def build_workload(
     Results are cached as JSONL at ``cache_path`` (deterministic data only, never
     state tokens) and reused when the cache already holds enough proofs.
     """
+    cache_metadata = {
+        "dataset_name": dataset_name,
+        "split": split,
+        "seed": seed,
+        "max_rows_scanned": max_rows_scanned,
+        "mining_version": MINING_VERSION,
+    }
+
     if cache_path is not None:
-        cached = _load_cache(cache_path)
+        cached = _load_cache(cache_path, cache_metadata)
         if len(cached) >= n_proofs:
             return cached[:n_proofs]
 
@@ -184,7 +196,7 @@ def build_workload(
     random.Random(seed).shuffle(mined)
     mined = mined[:n_proofs]
     if cache_path is not None:
-        _write_cache(cache_path, mined)
+        _write_cache(cache_path, mined, cache_metadata)
     return mined
 
 
@@ -220,11 +232,21 @@ def _brackets_balanced(text: str) -> bool:
     )
 
 
-def _load_cache(cache_path: Path) -> list[ProofWorkload]:
+def _load_cache(cache_path: Path, expected_metadata: dict[str, object]) -> list[ProofWorkload]:
     if not cache_path.is_file():
         return []
+    lines = cache_path.read_text().splitlines()
+    if not lines:
+        return []
+    try:
+        header = json.loads(lines[0])
+    except json.JSONDecodeError:
+        return []
+    if header.get("cache_metadata") != expected_metadata:
+        return []
+
     workloads: list[ProofWorkload] = []
-    for line in cache_path.read_text().splitlines():
+    for line in lines[1:]:
         if not line.strip():
             continue
         raw = json.loads(line)
@@ -239,9 +261,14 @@ def _load_cache(cache_path: Path) -> list[ProofWorkload]:
     return workloads
 
 
-def _write_cache(cache_path: Path, workloads: list[ProofWorkload]) -> None:
+def _write_cache(
+    cache_path: Path,
+    workloads: list[ProofWorkload],
+    cache_metadata: dict[str, object],
+) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
+    lines = [json.dumps({"cache_metadata": cache_metadata})]
+    lines.extend(
         json.dumps(
             {
                 "problem_id": w.problem_id,
@@ -251,5 +278,5 @@ def _write_cache(cache_path: Path, workloads: list[ProofWorkload]) -> None:
             }
         )
         for w in workloads
-    ]
+    )
     cache_path.write_text("\n".join(lines) + ("\n" if lines else ""))

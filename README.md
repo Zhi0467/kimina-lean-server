@@ -40,15 +40,16 @@ server directly from the repository root:
 cp .env.template .env
 uv sync --dev
 uv run prisma generate
-bash setup.sh # Installs Lean, repl and mathlib4
+bash setup.sh # Installs Lean and mathlib4 for the /exec Pantograph path
 uv run python -m server
 ```
 
 > [!NOTE]
 > In this development checkout, the server is not treated as an installed
 > Python package. It is run from source with `uv run python -m server`.
-> Make sure `mathlib4` and `repl` exist in the workspace directory before
-> launching the server.
+> Make sure `mathlib4` exists in the workspace directory before launching the
+> server. The legacy `/api/check` path also needs `repl`; build it with
+> `SETUP_REPL=1 bash setup.sh` if you need that path.
 
 
 Or with `docker compose up`.
@@ -111,7 +112,7 @@ client.check("#check Nat")
 | `LEAN_SERVER_PORT`                    | `8000`        | Port number for the server                             |
 | `LEAN_SERVER_LOG_LEVEL`               | `INFO`        | Logging level (`DEBUG`, `INFO`, `ERROR`, etc.)         |
 | `LEAN_SERVER_ENVIRONMENT`             | `dev`         | Environment `dev` or `prod`                            |
-| `LEAN_SERVER_LEAN_VERSION`            | `v4.26.0`     | Lean version                                           |
+| `LEAN_SERVER_LEAN_VERSION`            | `v4.29.1`     | Lean version                                           |
 | `LEAN_SERVER_MAX_REPLS`               | CPU count - 1 | Maximum number of REPLs                                |
 | `LEAN_SERVER_MAX_REPL_USES`           | `-1`          | Maximum number of uses per REPL (-1 is no limit)       |
 | `LEAN_SERVER_MAX_REPL_MEM`            | `8G`          | Maximum memory limit for each REPL (Linux-only)        |
@@ -201,10 +202,13 @@ An additional hook runs basic tests on push.
 > Use `--no-verify` to skip hooks on commit / push (but the CI runs them).
 
 
-Install [Lean 4](https://github.com/leanprover/lean4) and build the [repl](https://github.com/leanprover-community/repl) and [mathlib4](https://github.com/leanprover-community/mathlib4):
+Install [Lean 4](https://github.com/leanprover/lean4) and build [mathlib4](https://github.com/leanprover-community/mathlib4) for the `/exec` Pantograph path:
 ```sh
 bash setup.sh
 ```
+
+The legacy `/api/check` path uses the Lean REPL binary. Build it only when
+needed with `SETUP_REPL=1 bash setup.sh`.
 
 Run tests with (reads your `LEAN_SERVER_API_KEY` so make sure that line is commented):
 ```sh
