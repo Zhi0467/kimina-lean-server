@@ -453,16 +453,95 @@ def goalStepBatchItemError
     },
   }
 
+/--
+TRACK A WARMUP (single-threaded, runs BEFORE any item task is spawned).
+
+Forces every piece of lazily-realized, lazily-task-evaluated, or lazily-cached
+shared `Environment` state that a parent state's tactics would otherwise touch
+concurrently, so that all item tasks only ever *read* already-realized state.
+
+Background (verified against Lean 4.29.1 source):
+
+* `Lean.Environment.realizeValue` (Lean/Environment.lean) routes ALL realizations
+  of imported constants through ONE shared `importRealizationCtx?.realizeMapRef :
+  IO.Ref (...)`. The atomic `modifyGet` is safe, but the `realize` callback it
+  runs builds a fresh, single-threaded object graph (new `Expr`/`Level`/closures)
+  and only afterwards stores it into the shared (multi-threaded) ref. A second
+  task reading that just-stored graph touches objects whose reference counts were
+  never marked atomic -> RC corruption surfacing as crashes in `realizeValue`,
+  `Level.hash`, `getFunInfoAux`, simp/defeq/kabstract caches. There is also a
+  non-atomic fast-path `realizeMapRef.get` (Lean/Environment.lean ~2550) read
+  before the atomic block, which races a concurrent writer's PHashMap nodes.
+* `Environment.checked : Task Kernel.Environment` (Lean/Environment.lean) is the
+  async-elaboration result. Forcing it once on the main thread resolves the task
+  so tasks do not race resolving it.
+
+By doing one representative MetaM pass per distinct parent on the MAIN thread we
+populate `realizeMapRef` (and the kernel `checked` env) up-front. Item tasks then
+hit the fast read path only. After warmup we re-`markMultiThreaded` the whole
+env closure, so the objects allocated DURING warmup also get atomic RC.
+
+Warmup must not mutate REPL state, must not create children, and must free every
+region it loads before returning. -/
+def warmupGoalStepBatchItems
+    (options : Protocol.Options)
+    (items : Array Protocol.GoalStepBatchItem) : CoreM Unit := do
+  let env ← getEnv
+  -- Resolve the async-elaboration `checked` kernel environment task once on the
+  -- main thread. `toKernelEnv` is `env.checked.get`, which blocks until the task
+  -- is fulfilled; reading `constants.map₁.size` forces evaluation so the call is
+  -- not elided as dead code (`.map₁` is the imported `Std.HashMap`; cf.
+  -- `Lean/Environment.lean` `env.constants.map₁.size`). Returns immediately if
+  -- already resolved (the common REPL case).
+  let kernelConstCount := env.toKernelEnv.constants.map₁.size
+  discard <| pure (f := CoreM) kernelConstCount
+  -- De-duplicate parents: many items in a real batch share one parent state, so
+  -- realize each distinct parent exactly once.
+  let mut seenPaths : Std.HashMap System.FilePath Unit := Std.HashMap.emptyWithCapacity
+  for item in items do
+    -- Best-effort: a bad parent path is reported per item later; never abort the
+    -- whole warmup (and therefore the whole batch) for one unreadable parent.
+    unless seenPaths.contains item.parentPath do
+      seenPaths := seenPaths.insert item.parentPath ()
+      try
+        let (parent, region) ← goalStateUnpickle item.parentPath (background? := .some env)
+        try
+          -- Serializing the goals delaborates each goal's `Expr`s, which forces
+          -- the same instance / fun-info / discr-tree / match-equation
+          -- realizations a tactic would trigger, populating the shared realize
+          -- map single-threaded.
+          let _ ← (parent.serializeGoals (options := options)).run'
+        catch _ =>
+          -- Realization that genuinely fails (e.g. malformed state) will fail the
+          -- same way inside the item task; warmup only needs to be a cache primer.
+          pure ()
+        -- Warmup owns this region exclusively and creates no children from it, so
+        -- it is safe to free immediately on the main thread.
+        unsafe CompactedRegion.free region
+      catch _ =>
+        pure ()
+
 def runGoalStepBatchItems
     (scope : Elab.Command.Scope)
     (options : Protocol.Options)
     (outputDir : System.FilePath)
     (items : Array Protocol.GoalStepBatchItem)
-    (maxParallelItems : Nat) : CoreM (Array OwnedGoalStepBatchItemResult) := do
+    (maxParallelItems : Nat)
+    (warmup : Bool) : CoreM (Array OwnedGoalStepBatchItemResult) := do
   let parallel := Nat.max 1 maxParallelItems
+  -- Pre-realize lazy shared state on the main thread BEFORE marking anything
+  -- multi-threaded and BEFORE spawning tasks. Only needed when we will actually
+  -- run more than one item concurrently; with parallel = 1 the single task can
+  -- realize lazily with no race, exactly as the original sequential path did.
+  if warmup && parallel > 1 then
+    warmupGoalStepBatchItems options items
   let env ← getEnv
   let ctx ← read
   let st ← get
+  -- Mark AFTER warmup: this marks the closure reachable from `env` *now*, which
+  -- includes everything realized during warmup, giving those objects atomic RC
+  -- before any task can read them. (markMultiThreaded only covers objects
+  -- reachable at call time; see Lean Init/System/IO.lean.)
   discard <| unsafe Runtime.markMultiThreaded env
   discard <| unsafe Runtime.markMultiThreaded ctx
   discard <| unsafe Runtime.markMultiThreaded st
@@ -473,6 +552,13 @@ def runGoalStepBatchItems
     let chunk := items.extract start stop
     let mut tasks := #[]
     for item in chunk do
+      -- `Core.wrapAsync` (Lean/CoreM.lean) gives each task a FRESH `Core.State`
+      -- via `StateRefT'.run` (`ST.mkRef`), with child name/decl generators from
+      -- `mkChild`. The captured `st` is an immutable snapshot; per-task writes to
+      -- the (persistent) `Core.Cache`, `MetavarContext`, and `Meta.State.cache`
+      -- allocate new functional nodes and never mutate a sibling task's state.
+      -- So scratch-cache isolation is structural; warmup above closes the only
+      -- remaining shared-mutable hole (`Environment.realizeMapRef`/`checked`).
       let wrapped ← Core.wrapAsync
         (fun item => runGoalStepBatchItem scope options outputDir item)
         (cancelTk? := ctx.cancelTk?)
@@ -492,7 +578,7 @@ def goal_step_batch (args : Protocol.GoalStepBatch) : EMainM Protocol.GoalStepBa
   let scope := state.scope
   let options := state.options
   let ownedResults ← runCoreM $
-    runGoalStepBatchItems scope options args.outputDir args.items args.maxParallelItems
+    runGoalStepBatchItems scope options args.outputDir args.items args.maxParallelItems args.warmup
   let parentRegions := ownedResults.filterMap (·.parentRegion?)
   modify fun state => {
     state with

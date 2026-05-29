@@ -140,6 +140,7 @@ async def step_batch(
         max_parallel_items_per_lean_process=(
             settings.max_parallel_items_per_lean_process
         ),
+        pantograph_task_warmup=settings.pantograph_task_warmup,
     )
     try:
         return await execute_step_batch_request(

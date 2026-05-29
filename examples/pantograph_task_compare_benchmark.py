@@ -106,6 +106,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="1,16",
         help="Comma-separated max_parallel_items_per_lean_process values.",
     )
+    warmup_group = parser.add_mutually_exclusive_group()
+    warmup_group.add_argument(
+        "--task-warmup",
+        dest="task_warmup",
+        action="store_true",
+        default=None,
+        help=(
+            "Force Track A single-threaded pre-realization of lazy Lean "
+            "Environment state before parallel fanout (server default)."
+        ),
+    )
+    warmup_group.add_argument(
+        "--no-task-warmup",
+        dest="task_warmup",
+        action="store_false",
+        help="Disable warmup to reproduce/measure the un-warmed racy path.",
+    )
     parser.add_argument(
         "--max-rows-scanned",
         type=int,
@@ -493,6 +510,7 @@ def _server_args(
         max_items_per_worker_batch=args.max_items_per_worker_batch,
         max_parallel_items_per_lean_process=mode,
         state_store_dir=args.state_store_root / state_suffix,
+        task_warmup=getattr(args, "task_warmup", None),
     )
 
 

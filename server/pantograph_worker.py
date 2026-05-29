@@ -154,6 +154,7 @@ class PantographWorker:
         *,
         state_dir: Path,
         max_parallel_items: int,
+        warmup: bool = True,
     ) -> list[PantographBatchStepItemResult]:
         state_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -169,6 +170,7 @@ class PantographWorker:
                 payload,
                 output_dir=str(state_dir),
                 max_parallel_items=max_parallel_items,
+                warmup=warmup,
             )
         except Exception as exc:
             messages = exception_to_messages(exc)

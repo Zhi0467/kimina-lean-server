@@ -34,6 +34,7 @@ def _config(
     max_attempts_per_step_batch: int = 128,
     max_items_per_worker_batch: int = 16,
     max_parallel_items_per_lean_process: int = 16,
+    pantograph_task_warmup: bool = True,
 ) -> StepBatchBackendConfig:
     return StepBatchBackendConfig(
         exec_backend=exec_backend,
@@ -42,6 +43,7 @@ def _config(
         max_attempts_per_step_batch=max_attempts_per_step_batch,
         max_items_per_worker_batch=max_items_per_worker_batch,
         max_parallel_items_per_lean_process=max_parallel_items_per_lean_process,
+        pantograph_task_warmup=pantograph_task_warmup,
     )
 
 
@@ -55,6 +57,7 @@ class _FakeTaskWorker:
         self.calls: list[list[PantographBatchStepInput]] = []
         self.pool_calls: list[Path] = []
         self.parallel_caps: list[int] = []
+        self.warmups: list[bool] = []
         self.gc_calls = 0
 
     async def step_state_with_tactics(
@@ -76,9 +79,11 @@ class _FakeTaskWorker:
         *,
         state_dir: Path,
         max_parallel_items: int,
+        warmup: bool = True,
     ) -> list[PantographBatchStepItemResult]:
         self.calls.append(items)
         self.parallel_caps.append(max_parallel_items)
+        self.warmups.append(warmup)
         return [
             PantographBatchStepItemResult(
                 item_index=item.item_index,
@@ -137,8 +142,11 @@ class _OpenChildWorker(_FakeTaskWorker):
         *,
         state_dir: Path,
         max_parallel_items: int,
+        warmup: bool = True,
     ) -> list[PantographBatchStepItemResult]:
         self.calls.append(items)
+        self.parallel_caps.append(max_parallel_items)
+        self.warmups.append(warmup)
         self.state_dirs.append(state_dir)
         child_path = state_dir / "item_0_tactic_0.bin"
         child_path.write_bytes(f"child-{len(self.state_dirs)}".encode())
@@ -203,6 +211,38 @@ async def test_task_backend_groups_compatible_items_into_one_worker_batch(
     assert len(worker.calls) == 1
     assert [item.item_index for item in worker.calls[0]] == [0, 1]
     assert worker.parallel_caps == [7]
+    # Track A: the warmup decision flows from config to the worker/REPL.
+    assert worker.warmups == [True]
+
+
+@pytest.mark.asyncio
+async def test_task_backend_forwards_warmup_toggle_to_worker(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(
+        tmp_path / "store",
+        token_factory=iter(["st_0"]).__next__,
+    )
+    token = store.put(
+        _write_state(tmp_path / "root.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header="import Init",
+        header_hash="same",
+    )
+    request = StepBatchRequest(
+        items=[{"node_id": "n0", "state_token": token, "tactics": ["simp"]}]
+    )
+    worker = _FakeTaskWorker()
+
+    await execute_step_batch_request(
+        request,
+        state_store=store,
+        pantograph_manager=_FakeManager(worker),  # type: ignore[arg-type]
+        config=_config(pantograph_task_warmup=False),
+    )
+
+    assert worker.warmups == [False]
 
 
 @pytest.mark.asyncio

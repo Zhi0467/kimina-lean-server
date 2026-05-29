@@ -158,6 +158,12 @@ async def maybe_launch_server(args: argparse.Namespace) -> AsyncIterator[int | N
             "LEAN_SERVER_DATABASE_URL": "",
         }
     )
+    # Track A: optional toggle so the parallel path can be compared with and
+    # without single-threaded pre-realization of lazy Lean Environment state.
+    # Absent flag -> rely on the server default (warmup on).
+    task_warmup = getattr(args, "task_warmup", None)
+    if task_warmup is not None:
+        env["LEAN_SERVER_PANTOGRAPH_TASK_WARMUP"] = "true" if task_warmup else "false"
     args.api_url = f"http://{args.server_host}:{args.server_port}"
     log_handle: IO[bytes] | None = None
     stdout: int | IO[bytes] | None = asyncio.subprocess.DEVNULL

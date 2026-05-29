@@ -549,17 +549,27 @@ class Server:
             self,
             items: list[dict[str, Any]],
             output_dir: str,
-            max_parallel_items: int = 1) -> dict[str, Any]:
+            max_parallel_items: int = 1,
+            warmup: bool = True) -> dict[str, Any]:
         """
         Step file-backed parent states in one Pantograph command.
 
         Each item runs its tactics sequentially. Distinct items may run in
         parallel inside the Lean process up to ``max_parallel_items``.
+
+        When ``warmup`` is true (the default) and more than one item runs
+        concurrently, the REPL forces lazy ``Environment`` realization and
+        primes per-parent Meta caches on the single main thread before spawning
+        any item task. This keeps concurrent items from racing on Lean's shared
+        ``realizeMapRef``/``checked`` state, which is required for the parallel
+        path to be both crash-free and equivalent to the sequential path. Set
+        it false only to debug/measure the un-warmed path.
         """
         result = await self.run_async('goal.step_batch', {
             "items": items,
             "outputDir": os.path.abspath(output_dir),
             "maxParallelItems": max_parallel_items,
+            "warmup": warmup,
         })
         if "error" in result:
             raise ServerError(result["desc"])

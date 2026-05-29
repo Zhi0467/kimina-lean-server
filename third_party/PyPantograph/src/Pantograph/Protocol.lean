@@ -321,6 +321,14 @@ structure GoalStepBatch where
   items : Array GoalStepBatchItem
   outputDir : System.FilePath
   maxParallelItems : Nat := 1
+  -- If true (default), force lazy `Environment` realization and populate
+  -- per-parent Meta caches on the single main thread BEFORE any item task is
+  -- spawned. This is the Track A safety mechanism: concurrent item tasks must
+  -- never race on `Environment.realizeValue`'s shared `realizeMapRef`, the
+  -- `checked` async-elaboration task, or freshly-built single-threaded object
+  -- graphs. Set to false only for debugging/measuring the un-warmed path; the
+  -- server always sends true when `maxParallelItems > 1`.
+  warmup : Bool := true
   deriving FromJson
 
 structure GoalStepBatchAttemptResult where

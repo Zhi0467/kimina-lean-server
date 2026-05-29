@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     max_items_per_worker_batch: int = 16
     max_parallel_items_per_lean_process: int = 16
     max_lean_processes_per_env_profile: int = -1
+    # Track A safety: force single-threaded pre-realization of lazy Lean
+    # `Environment` state before fanning items out to concurrent Lean tasks.
+    # Keep this on for `pantograph_task`; only disable to reproduce/measure the
+    # un-warmed racy path.
+    pantograph_task_warmup: bool = True
 
     init_repls: dict[str, int] = {}
 

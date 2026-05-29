@@ -37,6 +37,8 @@ class StepBatchBackendConfig:
     max_attempts_per_step_batch: int
     max_items_per_worker_batch: int
     max_parallel_items_per_lean_process: int
+    # Track A: pre-realize lazy Lean Environment state before parallel fanout.
+    pantograph_task_warmup: bool = True
 
 
 @dataclass(frozen=True)
@@ -236,6 +238,7 @@ async def _execute_task_chunk(
                 worker_items,
                 state_dir=Path(output_dir),
                 max_parallel_items=config.max_parallel_items_per_lean_process,
+                warmup=config.pantograph_task_warmup,
             )
             _promote_task_worker_results(
                 worker_results,
