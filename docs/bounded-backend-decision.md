@@ -63,10 +63,12 @@ and low implementation cost.
   lease and steps its items sequentially via the proven
   `step_state_with_tactics` path. Preserves state pinning, the cap validation,
   and the existing `pantograph_pool` / `pantograph_task` seam.
-- `server/settings.py` — `exec_backend="pantograph_process_pool"`;
-  `DEFAULT_PROCESS_POOL_LANES=4` when the per-env cap is left unbounded. The lane
-  count is the **same knob** as the manager's `max_workers_per_env_profile`, so
-  the lanes can actually acquire that many concurrent leases.
+- `server/settings.py` — `pantograph_process_pool` is now the **default**
+  `exec_backend`; `DEFAULT_PROCESS_POOL_LANES=4` when the per-env cap is left
+  unbounded. The lane count is the **same knob** as the manager's
+  `max_workers_per_env_profile`, so the lanes can actually acquire that many
+  concurrent leases. `pantograph_pool` (item-at-a-time) and `pantograph_task`
+  (in-process, experimental) remain selectable via `LEAN_SERVER_EXEC_BACKEND`.
 
 ### Validation
 

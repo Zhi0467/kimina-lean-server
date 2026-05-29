@@ -11,7 +11,12 @@ from server.exec_backends import return_worker as _return_worker
 from server.main import create_app
 from server.routers.exec import cleanup as cleanup_endpoint
 from server.schemas_exec import CleanupRequest
-from server.settings import Environment, Settings
+from server.settings import (
+    DEFAULT_PROCESS_POOL_LANES,
+    Environment,
+    Settings,
+    effective_max_lean_processes_per_env_profile,
+)
 from server.state_store import StateStore
 
 
@@ -70,11 +75,18 @@ class _FakeLease:
     worker: _FakeWorker
 
 
-def test_exec_backend_defaults_to_pool_without_per_profile_cap() -> None:
+def test_exec_backend_defaults_to_process_pool() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.exec_backend == "pantograph_pool"
+    # The bounded multi-process pool is the shipped default: exact-equivalent to
+    # sequential and memory-bounded (mmap-shared Mathlib). With no explicit
+    # per-profile cap it resolves to DEFAULT_PROCESS_POOL_LANES worker lanes.
+    assert settings.exec_backend == "pantograph_process_pool"
     assert settings.max_lean_processes_per_env_profile == -1
+    assert (
+        effective_max_lean_processes_per_env_profile(settings)
+        == DEFAULT_PROCESS_POOL_LANES
+    )
 
 
 @pytest.mark.asyncio

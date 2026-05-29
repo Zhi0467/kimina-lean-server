@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     pantograph_worker_startup_timeout_seconds: int = 600
     exec_backend: Literal[
         "pantograph_pool", "pantograph_task", "pantograph_process_pool"
-    ] = "pantograph_pool"
+    ] = "pantograph_process_pool"
     max_items_per_step_batch: int = 16
     max_tactics_per_step_item: int = 8
     max_attempts_per_step_batch: int = 128
