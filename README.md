@@ -40,16 +40,15 @@ server directly from the repository root:
 cp .env.template .env
 uv sync --dev
 uv run prisma generate
-bash setup.sh # Installs Lean and mathlib4 for the /exec Pantograph path
+bash setup.sh # Installs Lean, mathlib4, and the legacy REPL
 uv run python -m server
 ```
 
 > [!NOTE]
 > In this development checkout, the server is not treated as an installed
 > Python package. It is run from source with `uv run python -m server`.
-> Make sure `mathlib4` exists in the workspace directory before launching the
-> server. The legacy `/api/check` path also needs `repl`; build it with
-> `SETUP_REPL=1 bash setup.sh` if you need that path.
+> Make sure `mathlib4` and `repl` exist in the workspace directory before
+> launching the server. `bash setup.sh` builds both by default.
 
 
 Or with `docker compose up`.
@@ -202,13 +201,10 @@ An additional hook runs basic tests on push.
 > Use `--no-verify` to skip hooks on commit / push (but the CI runs them).
 
 
-Install [Lean 4](https://github.com/leanprover/lean4) and build [mathlib4](https://github.com/leanprover-community/mathlib4) for the `/exec` Pantograph path:
+Install [Lean 4](https://github.com/leanprover/lean4), build [mathlib4](https://github.com/leanprover-community/mathlib4), and build the Lean REPL used by `/api/check`:
 ```sh
 bash setup.sh
 ```
-
-The legacy `/api/check` path uses the Lean REPL binary. Build it only when
-needed with `SETUP_REPL=1 bash setup.sh`.
 
 Run tests with (reads your `LEAN_SERVER_API_KEY` so make sure that line is commented):
 ```sh

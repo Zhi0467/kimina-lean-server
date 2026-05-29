@@ -32,6 +32,7 @@ class Manager:
         self._cond: asyncio.Condition | None = None
         self._free: list[Repl] = []
         self._busy: set[Repl] = set()
+        self._close_tasks: set[asyncio.Task[None]] = set()
 
         logger.info(
             "REPL manager initialized with: MAX_REPLS={}, MAX_REPL_USES={}, MAX_REPL_MEM={} MB",
@@ -39,6 +40,21 @@ class Manager:
             max_repl_uses,
             max_repl_mem,
         )
+
+    def _close_later(self, repl: Repl) -> None:
+        task = asyncio.create_task(close_verbose(repl))
+        self._close_tasks.add(task)
+
+        def _drop_task(done: asyncio.Task[None]) -> None:
+            self._close_tasks.discard(done)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.exception("Background REPL close failed: %s", e)
+
+        task.add_done_callback(_drop_task)
 
     def _ensure_lock(self) -> None:
         """Ensure the lock and condition are initialized in an async context."""
@@ -127,7 +143,7 @@ class Manager:
                     ) from None
 
         if repl_to_destroy is not None:
-            asyncio.create_task(close_verbose(repl_to_destroy))
+            self._close_later(repl_to_destroy)
 
         return await self.start_new(header)
 
@@ -138,7 +154,7 @@ class Manager:
             self._busy.discard(repl)
             if repl in self._free:
                 self._free.remove(repl)
-            asyncio.create_task(close_verbose(repl))
+            self._close_later(repl)
             self._cond.notify(1)
 
     async def release_repl(self, repl: Repl) -> None:
@@ -156,7 +172,7 @@ class Manager:
                 logger.info(f"REPL {uuid.hex[:8]} is exhausted, closing it")
                 self._busy.discard(repl)
 
-                asyncio.create_task(close_verbose(repl))
+                self._close_later(repl)
                 self._cond.notify(1)
                 return
             self._busy.remove(repl)
@@ -175,18 +191,35 @@ class Manager:
     async def cleanup(self) -> None:
         self._ensure_lock()
         assert self._cond is not None  # Type narrowing after _ensure_lock
+        repls_to_close: list[Repl] = []
         async with self._cond:
             logger.info("Cleaning up REPL manager...")
-            for repl in self._free:
-                asyncio.create_task(close_verbose(repl))
+            repls_to_close.extend(self._free)
             self._free.clear()
 
-            for repl in self._busy:
-                asyncio.create_task(close_verbose(repl))
+            repls_to_close.extend(self._busy)
             self._busy.clear()
+            self._cond.notify_all()
 
-            logger.info("REPL manager cleaned up!")
-        pass
+        close_tasks = list(self._close_tasks)
+        close_tasks.extend(asyncio.create_task(close_verbose(repl)) for repl in repls_to_close)
+        if close_tasks:
+            done, pending = await asyncio.wait(close_tasks, timeout=5)
+            for task in done:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.exception("REPL close failed during cleanup: %s", e)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            self._close_tasks.difference_update(done)
+            self._close_tasks.difference_update(pending)
+
+        logger.info("REPL manager cleaned up!")
 
     async def prep(
         self, repl: Repl, snippet_id: str, timeout: float, debug: bool

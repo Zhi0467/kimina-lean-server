@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.logging import Client as GCPClient
 from google.cloud.logging.handlers import CloudLoggingHandler
@@ -17,7 +19,7 @@ def setup_logging() -> None:
 
     if settings.environment == Environment.prod:
         try:
-            gcp_client = GCPClient()
+            gcp_client = cast(Any, GCPClient)()
             gcp_handler = CloudLoggingHandler(gcp_client)
             logger.add(gcp_handler, level="INFO", serialize=True)
         except DefaultCredentialsError:

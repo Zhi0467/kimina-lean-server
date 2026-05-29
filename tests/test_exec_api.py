@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
+from server.exec_backends import return_worker as _return_worker
 from server.main import create_app
-from server.routers.exec import _return_worker, cleanup as cleanup_endpoint
+from server.routers.exec import cleanup as cleanup_endpoint
 from server.schemas_exec import CleanupRequest
 from server.settings import Environment, Settings
 from server.state_store import StateStore
@@ -19,13 +20,20 @@ def _write_state(path: Path, data: bytes = b"state") -> Path:
     return path
 
 
-def _test_client(tmp_path: Path) -> TestClient:
+def _test_client(
+    tmp_path: Path,
+    *,
+    exec_backend: Literal["pantograph_pool", "pantograph_task"] = "pantograph_pool",
+) -> TestClient:
     settings = Settings(_env_file=None)
     settings.database_url = None
     settings.environment = Environment.prod
     settings.init_repls = {}
     settings.state_store_dir = tmp_path / "state-store"
     settings.max_pantograph_workers = 1
+    settings.exec_backend = exec_backend
+    if exec_backend == "pantograph_task":
+        settings.max_lean_processes_per_env_profile = 1
     return TestClient(create_app(settings))
 
 
@@ -62,6 +70,13 @@ class _FakeWorker:
 @dataclass
 class _FakeLease:
     worker: _FakeWorker
+
+
+def test_exec_backend_defaults_to_pool_without_per_profile_cap() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.exec_backend == "pantograph_pool"
+    assert settings.max_lean_processes_per_env_profile == -1
 
 
 @pytest.mark.asyncio
@@ -155,8 +170,12 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
         assert store.stats().state_count == 0
 
 
-def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> None:
-    with _test_client(tmp_path) as client:
+@pytest.mark.parametrize("exec_backend", ["pantograph_pool", "pantograph_task"])
+def test_exec_create_step_and_cleanup_real_pantograph_e2e(
+    tmp_path: Path,
+    exec_backend: Literal["pantograph_pool", "pantograph_task"],
+) -> None:
+    with _test_client(tmp_path, exec_backend=exec_backend) as client:
         create_response = client.post(
             "/exec/create_states",
             json={

@@ -2,7 +2,7 @@ import os
 import re
 from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     environment: Environment = Environment.dev
 
-    lean_version: str = "v4.26.0"
+    lean_version: str = "v4.29.1"
     repl_path: Path = BASE_DIR / "repl/.lake/build/bin/repl"
     project_dir: Path = BASE_DIR / "mathlib4"
 
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     max_pantograph_workers: int = max_repls
     max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
+    exec_backend: Literal["pantograph_pool", "pantograph_task"] = "pantograph_pool"
+    max_items_per_step_batch: int = 16
+    max_tactics_per_step_item: int = 8
+    max_attempts_per_step_batch: int = 128
+    max_items_per_worker_batch: int = 16
+    max_parallel_items_per_lean_process: int = 16
+    max_lean_processes_per_env_profile: int = -1
 
     init_repls: dict[str, int] = {}
 

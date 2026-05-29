@@ -105,10 +105,10 @@ async def test_single_snippet(client: TestClient) -> None:
     ],
     indirect=True,
 )
-async def test_mathlib(client: TestClient) -> None:
+async def test_import_reuse(client: TestClient) -> None:
     uuid = str(uuid4())
     payload = CheckRequest(
-        snippets=[Snippet(id=uuid, code="import Mathlib\ndef f := 1")],
+        snippets=[Snippet(id=uuid, code="import Lean\ndef f := 1")],
         debug=True,  # Enable debug to see diagnostics
     ).model_dump()
     resp = client.post("check", json=payload)
@@ -130,7 +130,7 @@ async def test_mathlib(client: TestClient) -> None:
 
     uuid = str(uuid4())
     payload = CheckRequest(
-        snippets=[Snippet(id=uuid, code="import Mathlib\ndef f := 2")],
+        snippets=[Snippet(id=uuid, code="import Lean\ndef f := 2")],
         debug=True,
     ).model_dump()
     resp1 = client.post("check", json=payload)
@@ -216,6 +216,16 @@ async def test_timeout(client: TestClient) -> None:
             ]
         ).model_dump(exclude_none=True),
         "v4.26.0": CheckResponse(
+            results=[
+                ReplResponse(
+                    id=uuid,
+                    response=CommandResponse(
+                        env=0,
+                    ),
+                )
+            ]
+        ).model_dump(exclude_none=True),
+        "v4.29.1": CheckResponse(
             results=[
                 ReplResponse(
                     id=uuid,

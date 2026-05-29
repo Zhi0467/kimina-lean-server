@@ -15,10 +15,10 @@ LEAN_SERVER_LEAN_VERSION="${LEAN_SERVER_LEAN_VERSION:-v4.29.1}"
 MATHLIB_REPO_URL="${MATHLIB_REPO_URL:-https://github.com/leanprover-community/mathlib4.git}"
 MATHLIB_BRANCH="${MATHLIB_BRANCH:-bump_to_v4.29.1}"
 
-# The Lean REPL is only used by the legacy `/api/check` path; the Pantograph `/exec`
-# path bundles its own binary and does not need it. It is skipped by default because
-# `repl` has no v4.29.1 release. Set SETUP_REPL=1 to build it (latest is v4.29.0).
-SETUP_REPL="${SETUP_REPL:-0}"
+# The Lean REPL is used by the legacy `/api/check` path. The latest tagged REPL
+# source is v4.29.0, but it builds cleanly with v4.29.1 and must use the same
+# toolchain as mathlib4 to run under `lake env`.
+SETUP_REPL="${SETUP_REPL:-1}"
 REPL_REPO_URL="${REPL_REPO_URL:-https://github.com/leanprover-community/repl.git}"
 REPL_BRANCH="${REPL_BRANCH:-v4.29.0}"
 
@@ -51,12 +51,16 @@ version_lte() {
 
 install_repo() {
   local name="$1" url="$2" branch="$3" upd_manifest="$4"
+  local lean_toolchain="${5:-}"
   echo "Installing ${name}@${branch}..."
   if [ ! -d "$name" ]; then
     git clone --branch "${branch}" --single-branch --depth 1 "$url" "$name"
   fi
   pushd "$name"
     git checkout "${branch}"
+    if [ -n "$lean_toolchain" ]; then
+      printf 'leanprover/lean4:%s\n' "$lean_toolchain" > lean-toolchain
+    fi
     if [ "$name" = "mathlib4" ]; then
       lake exe cache get
     fi
@@ -69,7 +73,7 @@ install_repo() {
 }
 
 if [ "$SETUP_REPL" = "1" ]; then
-  install_repo repl "$REPL_REPO_URL" "$REPL_BRANCH" false
+  install_repo repl "$REPL_REPO_URL" "$REPL_BRANCH" false "$LEAN_SERVER_LEAN_VERSION"
 
   # Cherry-pick EOL flush commit for v4.9.0 and under.
   if version_lte "$REPL_BRANCH" "v4.9.0"; then
@@ -81,7 +85,7 @@ if [ "$SETUP_REPL" = "1" ]; then
     popd
   fi
 else
-  echo "Skipping repl build (SETUP_REPL=0). Set SETUP_REPL=1 for the legacy /api/check path."
+  echo "Skipping repl build (SETUP_REPL=0)."
 fi
 
 install_repo mathlib4 "$MATHLIB_REPO_URL" "$MATHLIB_BRANCH" true

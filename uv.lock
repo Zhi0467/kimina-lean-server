@@ -818,7 +818,7 @@ requires-dist = [
     { name = "google-cloud-logging", specifier = ">=3.12.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7.3" },
-    { name = "pantograph", git = "https://github.com/stanford-centaur/PyPantograph?rev=ffa7f243824d2762825abddb1e9f6e939ede761f" },
+    { name = "pantograph", editable = "third_party/PyPantograph" },
     { name = "pip", specifier = ">=25.1.1" },
     { name = "prisma", specifier = ">=0.15.0" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -1198,7 +1198,16 @@ wheels = [
 [[package]]
 name = "pantograph"
 version = "0.3.15"
-source = { git = "https://github.com/stanford-centaur/PyPantograph?rev=ffa7f243824d2762825abddb1e9f6e939ede761f#ffa7f243824d2762825abddb1e9f6e939ede761f" }
+source = { editable = "third_party/PyPantograph" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "jupyter-book", specifier = ">=1.0.4.post1" },
+    { name = "notebook" },
+    { name = "pytest", specifier = ">=8.4.1" },
+]
 
 [[package]]
 name = "pathspec"

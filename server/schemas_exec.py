@@ -59,10 +59,14 @@ class StateInfo(BaseModel):
     goals: list[str] = Field(default_factory=list)
 
 
+def _empty_state_infos() -> list[StateInfo]:
+    return []
+
+
 class CreateStatesResult(BaseModel):
     item_id: str
     status: ExecStatus
-    states: list[StateInfo] = Field(default_factory=list)
+    states: list[StateInfo] = Field(default_factory=_empty_state_infos)
     messages: list[str] = Field(default_factory=list)
 
 
@@ -78,9 +82,13 @@ class StepResult(BaseModel):
     messages: list[str] = Field(default_factory=list)
 
 
+def _empty_step_results() -> list[StepResult]:
+    return []
+
+
 class StepBatchResult(BaseModel):
     node_id: str
-    results: list[StepResult] = Field(default_factory=list)
+    results: list[StepResult] = Field(default_factory=_empty_step_results)
 
 
 class StepBatchResponse(BaseModel):

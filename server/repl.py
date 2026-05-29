@@ -5,6 +5,7 @@ import platform
 import signal
 import tempfile
 from asyncio.subprocess import Process
+from contextlib import suppress
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -343,14 +344,30 @@ class Repl:
     async def close(self) -> None:
         if self.proc:
             self.last_check_at = datetime.now()
-            assert self.proc.stdin is not None, "stdin pipe not initialized"
-            self.proc.stdin.close()
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-            await self.proc.wait()
-            if self._cpu_task:
-                self._cpu_task.cancel()
-            if self._mem_task:
-                self._mem_task.cancel()
+            proc = self.proc
+            self.proc = None
+
+            if proc.stdin is not None:
+                with suppress(Exception):
+                    proc.stdin.close()
+                with suppress(Exception):
+                    await proc.stdin.wait_closed()
+
+            if proc.returncode is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            with suppress(ProcessLookupError):
+                await proc.wait()
+
+            monitor_tasks = [
+                task
+                for task in (self._cpu_task, self._mem_task)
+                if task is not None and not task.done()
+            ]
+            for task in monitor_tasks:
+                task.cancel()
+            if monitor_tasks:
+                await asyncio.gather(*monitor_tasks, return_exceptions=True)
 
             if db.connected:
                 await prisma.repl.update(

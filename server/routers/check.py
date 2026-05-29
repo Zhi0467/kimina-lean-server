@@ -1,11 +1,12 @@
 import asyncio
 import json
-from typing import cast
+from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
 from kimina_client import CheckRequest, Infotree, ReplResponse, Snippet
 from kimina_client.models import CheckResponse, CommandResponse, Pos
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
+from prisma.fields import Json
 
 from ..auth import require_key
 from ..db import db
@@ -26,7 +27,7 @@ def get_manager(request: Request) -> Manager:
 def _shift_line(pos: Pos | None, offset: int) -> None:
     if not pos:
         return
-    line = pos.get("line")
+    line = pos["line"]
     pos["line"] = line + offset
 
 
@@ -171,12 +172,12 @@ async def run_checks(
                         data={
                             "id": snippet.id,
                             "code": body,
-                            "diagnostics": json.dumps(
-                                resp.diagnostics if resp.diagnostics else None
-                            ),
-                            "response": json.dumps(
-                                resp.response if resp.response else None
-                            ),
+                            "diagnostics": Json(cast(Any, resp.diagnostics))
+                            if resp.diagnostics
+                            else None,
+                            "response": Json(cast(Any, resp.response))
+                            if resp.response
+                            else None,
                             "time": resp.time,
                             "error": resp.error,
                             "repl": {

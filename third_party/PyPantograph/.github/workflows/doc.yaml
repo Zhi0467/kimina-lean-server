@@ -1,0 +1,54 @@
+name: deploy-doc
+
+on:
+  push:
+    branches:
+    - main
+
+# This job installs dependencies, builds the book, and pushes it to `gh-pages`
+jobs:
+  deploy-book:
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Install Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install elan
+      run: |
+        set -o pipefail
+        curl -sSfL https://github.com/leanprover/elan/releases/download/v3.1.1/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+        ./elan-init -y --default-toolchain none
+        echo "$HOME/.elan/bin" >> "${GITHUB_PATH}"
+
+    - name: Install Lean
+      run: |
+        elan toolchain install $(<src/lean-toolchain)
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        uv sync
+
+    - name: Build documentations
+      run: |
+        uv run --group dev jupyter-book build doc
+
+    # Upload the book's HTML as an artifact
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: "doc/_build/html"
+
+    # Deploy the book's HTML to GitHub Pages
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4

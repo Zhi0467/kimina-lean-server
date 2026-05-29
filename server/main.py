@@ -52,6 +52,7 @@ def create_app(settings: Settings) -> FastAPI:
             init_repls=settings.init_repls,
         )
         app.state.manager = manager
+        app.state.settings = settings
         app.state.state_store = StateStore(
             settings.state_store_dir,
             ttl_seconds=settings.state_ttl_seconds,
@@ -62,6 +63,7 @@ def create_app(settings: Settings) -> FastAPI:
             project_path=settings.project_dir,
             buffer_limit=settings.pantograph_buffer_limit,
             max_worker_uses=settings.max_pantograph_worker_uses,
+            max_workers_per_env_profile=settings.max_lean_processes_per_env_profile,
         )
         app.state.state_gc_task = asyncio.create_task(
             run_state_gc(

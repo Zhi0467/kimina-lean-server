@@ -33,6 +33,8 @@ class StateRecord:
     created_at: datetime
     last_accessed_at: datetime
     size_bytes: int
+    backend_kind: str = "pantograph_pool"
+    state_format: str = "pantograph_goal_state_file"
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,7 @@ class StateStore:
         self._token_factory = token_factory or self._default_token
         self._records: dict[str, StateRecord] = {}
         self._tokens_by_item_id: dict[str, set[str]] = {}
+        self._pinned_tokens: dict[str, int] = {}
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._rehydrate()
 
@@ -90,6 +93,8 @@ class StateStore:
         env_profile: str,
         header: str = "",
         header_hash: str,
+        backend_kind: str = "pantograph_pool",
+        state_format: str = "pantograph_goal_state_file",
     ) -> str:
         source_path = Path(path)
         if not source_path.is_file():
@@ -111,6 +116,8 @@ class StateStore:
             created_at=now,
             last_accessed_at=now,
             size_bytes=target_path.stat().st_size,
+            backend_kind=backend_kind,
+            state_format=state_format,
         )
         self._records[state_token] = record
         self._tokens_by_item_id.setdefault(item_id, set()).add(state_token)
@@ -132,12 +139,39 @@ class StateStore:
             created_at=record.created_at,
             last_accessed_at=self._now(),
             size_bytes=record.size_bytes,
+            backend_kind=record.backend_kind,
+            state_format=record.state_format,
         )
         self._records[state_token] = updated
         self._write_metadata(updated)
         return updated
 
-    def create_child(self, parent_token: str, child_path: Path) -> str:
+    def resolve_and_pin(self, state_token: str) -> StateRecord:
+        record = self.resolve(state_token)
+        self._pinned_tokens[state_token] = self._pinned_tokens.get(state_token, 0) + 1
+        return record
+
+    def unpin(self, state_token: str) -> None:
+        count = self._pinned_tokens.get(state_token)
+        if count is None:
+            return
+        if count <= 1:
+            self._pinned_tokens.pop(state_token, None)
+        else:
+            self._pinned_tokens[state_token] = count - 1
+
+    def unpin_many(self, state_tokens: list[str]) -> None:
+        for state_token in state_tokens:
+            self.unpin(state_token)
+
+    def create_child(
+        self,
+        parent_token: str,
+        child_path: Path,
+        *,
+        backend_kind: str | None = None,
+        state_format: str | None = None,
+    ) -> str:
         parent = self.resolve(parent_token)
         return self.put(
             child_path,
@@ -145,6 +179,8 @@ class StateStore:
             env_profile=parent.env_profile,
             header=parent.header,
             header_hash=parent.header_hash,
+            backend_kind=backend_kind or parent.backend_kind,
+            state_format=state_format or parent.state_format,
         )
 
     def delete_by_item_id(self, item_id: str) -> DeleteStats:
@@ -190,6 +226,8 @@ class StateStore:
         deleted_states = 0
         deleted_bytes = 0
         for token in tokens:
+            if token in self._pinned_tokens:
+                continue
             record = self._records.pop(token, None)
             if record is None:
                 continue
@@ -235,6 +273,11 @@ class StateStore:
         deleted_bytes = 0
         cutoff_ts = cutoff.timestamp()
         for path in self.root_dir.glob("*"):
+            if path.is_dir() and path.name.startswith("pg_batch_"):
+                stats = self._sweep_orphan_batch_dir(path, cutoff_ts)
+                deleted_states += stats.deleted_states
+                deleted_bytes += stats.deleted_bytes
+                continue
             if not path.is_file() or path.stem in self._records:
                 continue
             try:
@@ -250,6 +293,26 @@ class StateStore:
             if path.suffix == ".bin":
                 deleted_states += 1
                 deleted_bytes += stat.st_size
+        return DeleteStats(deleted_states=deleted_states, deleted_bytes=deleted_bytes)
+
+    def _sweep_orphan_batch_dir(self, path: Path, cutoff_ts: float) -> DeleteStats:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return DeleteStats(deleted_states=0, deleted_bytes=0)
+        if stat.st_mtime >= cutoff_ts:
+            return DeleteStats(deleted_states=0, deleted_bytes=0)
+
+        deleted_states = 0
+        deleted_bytes = 0
+        for child in path.rglob("*.bin"):
+            try:
+                child_stat = child.stat()
+            except FileNotFoundError:
+                continue
+            deleted_states += 1
+            deleted_bytes += child_stat.st_size
+        shutil.rmtree(path, ignore_errors=True)
         return DeleteStats(deleted_states=deleted_states, deleted_bytes=deleted_bytes)
 
     def _rehydrate(self) -> None:
@@ -282,6 +345,8 @@ class StateStore:
                 created_at=datetime.fromisoformat(raw["created_at"]),
                 last_accessed_at=datetime.fromisoformat(raw["last_accessed_at"]),
                 size_bytes=int(raw["size_bytes"]),
+                backend_kind=raw.get("backend_kind", "pantograph_pool"),
+                state_format=raw.get("state_format", "pantograph_goal_state_file"),
             )
         except (OSError, KeyError, ValueError, json.JSONDecodeError):
             logger.warning("Ignoring unreadable state metadata: {}", metadata_path)
@@ -299,6 +364,8 @@ class StateStore:
                     "created_at": record.created_at.isoformat(),
                     "last_accessed_at": record.last_accessed_at.isoformat(),
                     "size_bytes": record.size_bytes,
+                    "backend_kind": record.backend_kind,
+                    "state_format": record.state_format,
                 }
             )
         )

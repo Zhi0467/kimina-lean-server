@@ -6,6 +6,60 @@ Goal: support at least one `/exec/step_batch` request containing 16 proof-state
 items with 8 tactics each, i.e. 128 tactic attempts, without running one
 Mathlib-loaded OS process per item.
 
+## Backend Migration Progress
+
+Status is tracked here while the migration is active. Keep this section current
+before returning to broader updates in `docs/backend-end-plan.md`.
+
+| Step | Status | Notes |
+| --- | --- | --- |
+| Repo-local PyPantograph fork | Done | `pantograph` resolves from `third_party/PyPantograph` via uv editable source. |
+| File-backed `CompactedRegion` ownership | Done | `goal.load` regions are retained and freed on the next command after delete/reset. |
+| Lean-side `goal.step_batch` | Done | File-backed parents, one task per item, sequential tactics per item, child state saving, and deferred parent-region cleanup are implemented in the fork. |
+| PyPantograph `goal_step_batch_async` wrapper | Done | Thin one-command/one-response wrapper exists in the forked Python client. |
+| StateStore backend metadata and pinning | Done | Tokens carry `backend_kind` and `state_format`; `/exec` pins resolved parents while Lean work is in flight. |
+| `/exec` backend seam | Done | `pantograph_pool` remains the default; `pantograph_task` is opt-in and groups compatible items into worker chunks. |
+| Caps and tests | Done | Config caps reject oversized requests; tests cover grouping, incompatible headers, per-command child output isolation, stale batch-dir GC, pool fallback, invalid tokens, cleanup, route e2e for both backends, and direct 16 x 8 one-process stepping. |
+| Runtime metrics | Pending | Basic tests validate behavior, but production metrics for chunk latency, per-attempt timing, and worker RSS still need to be added before performance claims. |
+
+Current implementation checkpoint, 2026-05-28:
+
+- Lean fork: `third_party/PyPantograph/src/Pantograph/Protocol.lean` defines
+  the `goal.step_batch` ABI, and `third_party/PyPantograph/src/Repl.lean`
+  dispatches it.
+- Python wrapper: `third_party/PyPantograph/pantograph/server.py` exposes
+  `goal_step_batch_async(...)`.
+- Server seam: `server/exec_backends.py` owns the pool/task backend selection,
+  caps, grouping, chunking, worker return, and child-token promotion.
+- State lifetime: `server/state_store.py` persists backend metadata and pins
+  active parent tokens so cleanup/GC cannot delete files after resolution but
+  before Lean loads them.
+- Settings: `exec_backend` defaults to `pantograph_pool`; `pantograph_task`
+  remains available as an opt-in backend until the heavier Mathlib concurrency
+  gates and production metrics pass.
+
+Verified tests:
+
+```text
+uv run pytest -q
+SSL_CERT_FILE=$(uv run python -c 'import certifi; print(certifi.where())') \
+  uv run pre-commit run --all-files
+uv run pyright --project=pyrightconfig.json
+uv run mypy --config-file=pyproject.toml --cache-dir=.mypy_cache \
+  --show-error-codes
+```
+
+`uv run pytest -q` passed 130 tests with 103 deselected by the repo's default
+markers. The run includes the direct `goal_step_batch_async` 16 items x 8
+tactics capacity test in one Pantograph process and the real
+`/exec/create_states -> /exec/step_batch -> /exec/cleanup` route test under both
+`pantograph_pool` and `pantograph_task`.
+
+The legacy `/api/check` test path is green again after restoring the local REPL
+setup: `setup.sh` now builds `repl` by default and forces its `lean-toolchain`
+to the same `v4.29.1` used by Mathlib and Pantograph. The default Lean version
+reported by the server is also `v4.29.1`.
+
 The target memory shape is bounded by a fixed small number of warm Lean
 processes per `env_profile`, ideally one:
 
@@ -40,12 +94,188 @@ create states, apply tactics, produce child states, return errors for invalid
 tactics, and cleanup files. Its throughput numbers are not useful because the
 run was dominated by cold Mathlib loading.
 
+First falsifiable item-task spike, run against a scratch copy of pinned
+Pantograph on 2026-05-28:
+
+- one Lean process loaded parent state files, ran one task per item, tried 8
+  tactics sequentially per item, saved open children, reloaded those children,
+  and stepped them again;
+- `Init`, 16 items x 8 tactics x 50 trials passed;
+- `Mathlib`, 16 items x 8 tactics x 1 trial passed;
+- Mathlib 16 x 8 peak RSS was about 3.36GiB, not `16 * 3GB`.
+
+This does not prove production readiness. It only says the item-level task shape
+is not immediately falsified by light tactics. The remaining blockers are region
+ownership, heavier realization-collision tactics, timeouts, and resource caps.
+
+## File-Backed State Memory
+
+There are two different cleanup paths in Pantograph:
+
+```text
+process-local stateId cleanup:
+  Python GoalState object disappears
+  -> PyPantograph queues stateId
+  -> server.gc_async sends goal.delete
+  -> Pantograph erases that id from State.goalStates
+
+file-backed state cleanup:
+  goal.save writes a GoalState to a .bin file
+  goal.load reads that file back into the process
+  -> Lean also returns a CompactedRegion backing the loaded object graph
+```
+
+The current durable `state_token` design relies on the second path because
+tokens map to saved state files, not process-local `stateId`s. This is the
+reason `CompactedRegion` matters. It is the memory block created when Lean loads
+a saved proof-state file. A loaded `GoalState` can reference that block.
+
+Upstream Pantograph's current `goal_load` implementation does this:
+
+```lean
+let (goalState, _) ← goalStateUnpickle args.path (background? := .some $ ← getEnv)
+let id ← newGoalState goalState
+```
+
+The underscore discards the region handle. Pantograph's `Serial.lean` explicitly
+says ignoring the returned `CompactedRegion` leaks memory. This is separate from
+normal `goal.delete` cleanup: deleting the `stateId` removes the `GoalState`
+from the map, but does not by itself prove the backing region from `goal_load`
+was released.
+
+Practical rule for the task backend:
+
+- do not manually free regions early while any loaded `GoalState`, child state,
+  serialized goal output, or Lean monadic state may still reference them;
+- measure whether repeated `goal_load -> goal.delete/gc` grows RSS in current
+  Pantograph;
+- if it grows, patch the Pantograph fork so a loaded resident state owns its
+  optional region and `goal.delete` frees that region after removing the state;
+- until that patch is proven, keep worker recycling and RSS limits as the
+  safety fallback.
+
+Measured on current pinned Pantograph with one tiny Init state:
+
+```text
+goal_start -> goal.delete, 5000 iterations:
+  RSS rose once by about 5MB, then stayed flat.
+
+goal_load -> goal.delete, 5000 iterations:
+  RSS grew by about 112MB.
+```
+
+That confirms the growth is specific to file-backed `goal_load`, not normal
+process-local state churn.
+
+Scratch fork resolution:
+
+1. Add `goalStateRegions : HashMap Nat CompactedRegion` to the REPL state.
+2. Make `goal_load` store the region under the new resident state id.
+3. Make `goal_delete` remove the region from the map, but only move it into a
+   `releasedGoalStateRegions` queue.
+4. At the start of the next command, free queued regions after the previous
+   command frame has returned.
+
+Freeing inside the same `goal_delete` command crashed, because local values in
+that command frame can still reference the loaded object graph. Deferring until
+the next command avoided that crash.
+
+Measured with the scratch fork:
+
+```text
+goal_load -> goal.delete, 5000 iterations:
+  RSS stayed within about +1.5MB.
+```
+
+This should be the Pantograph-fork fix unless a deeper Lean API offers a cleaner
+region-owner abstraction.
+
+## Current Local Fork Slice
+
+As of 2026-05-28, the repo uses a source fork at
+`third_party/PyPantograph`, copied from the previously pinned
+`stanford-centaur/PyPantograph@ffa7f243824d2762825abddb1e9f6e939ede761f`.
+The root `pyproject.toml` points `pantograph` at that path as an editable uv
+source.
+
+The fork currently contains both source-level migration fixes:
+
+- `src/Repl.lean` tracks file-loaded `CompactedRegion`s by resident
+  `stateId`;
+- `goal.load` stores the region instead of discarding it;
+- `goal.delete` and `reset` move deleted regions into a deferred-release queue;
+- the next command frees that queue before dispatching new work.
+- `src/Pantograph/Protocol.lean` defines the `goal.step_batch` request and
+  result ABI;
+- `src/Repl.lean` dispatches `goal.step_batch`, loads file-backed parents
+  inside item tasks, tries tactics sequentially per item, saves open children,
+  and queues parent `CompactedRegion`s for deferred release.
+
+Generated artifacts stay local:
+
+- `third_party/PyPantograph/src/.lake/`
+- `third_party/PyPantograph/pantograph/pantograph-repl`
+- `third_party/PyPantograph/pantograph/lean-toolchain`
+
+After editing Lean files in the fork, rebuild with:
+
+```sh
+cd third_party/PyPantograph
+uv run python build-pantograph.py
+```
+
+Then from the repo root:
+
+```sh
+UV_HTTP_TIMEOUT=120 uv lock
+UV_HTTP_TIMEOUT=120 uv sync --frozen
+```
+
+Current verification for this slice:
+
+- `uv lock` resolves `pantograph` as `source = { editable =
+  "third_party/PyPantograph" }`;
+- `uv sync --frozen` replaces the upstream git package with the local path;
+- `import pantograph` resolves to
+  `third_party/PyPantograph/pantograph/__init__.py`;
+- 5,000 `goal_load -> goal.delete` iterations on a tiny Init state ended with
+  RSS delta `-393216` bytes from baseline, instead of the prior
+  roughly `+112MB` growth;
+- direct `goal_step_batch_async(...)` tests pass, including 16 items x 8
+  tactics in one Pantograph process with `maxParallelItems = 16`;
+- full repo tests pass with the default marker selection:
+  `uv run pytest -q`;
+- pre-commit passes with ruff, pyright, and mypy:
+  `uv run pre-commit run --all-files`;
+- the maintained typecheck scope is the active server plus the exec client
+  models; archived `server/server_old`, broad client infotree utilities,
+  examples, and perf/match tests are outside that hook scope.
+
+The next slice should not re-prove the 16 x 8 one-process shape from scratch.
+That has already been tested in `.cache/pantograph-concurrency-spike` with
+`Core.wrapAsync`, `Runtime.markMultiThreaded`, one task per item, and sequential
+tactics inside each item. That machinery has now been ported into the committed
+Pantograph fork as a real `goal.step_batch` command, with the region-lifetime
+fix integrated instead of deliberately leaking parent-load regions as the spike
+did.
+
 ## Migration Plan
 
 The migration target is not "replace Pantograph everywhere in one jump." The
-right path is to preserve the public `/exec` API and `StateStore`, insert a
-backend abstraction behind the router, then swap only the worker implementation
-after a one-process batch primitive passes tests.
+public `/exec` API and `StateStore` remain stable. The implementation order was:
+
+1. Productize the scratch item-task primitive inside the local Pantograph fork.
+2. Add a thin PyPantograph wrapper for that command.
+3. Insert a backend abstraction behind `server/routers/exec.py`.
+4. Keep the current one-worker-per-item behavior as `pantograph_pool`.
+5. Add `pantograph_task` behind a config flag and route compatible chunks to one
+   `goal.step_batch` command per leased worker.
+6. Harden concurrency, timeouts, caps, metrics, and real-data benchmarks before
+   making `pantograph_task` the default.
+
+This order is intentional: the one-process item-task feasibility result already
+exists, but the server cannot use it until `goal.step_batch` exists as a real
+forked Pantograph command.
 
 ### Migration Invariants
 
@@ -79,8 +309,11 @@ Current route behavior:
 - Each valid item calls `PantographManager.get_worker`.
 - The leased worker loads one parent state and applies that item's tactics.
 
-This is the behavior that cannot scale. First, wrap it behind a compatibility
-backend rather than deleting it.
+This is bounded by `max_workers`; it does not spawn an unbounded process per
+request item. The scalability problem is narrower: throughput increases only by
+occupying more Mathlib-loaded workers, and each worker carries the large warm
+process RSS. First, wrap this behavior behind a compatibility backend rather
+than deleting it.
 
 Add a small internal backend interface, for example `server/exec_backend.py`:
 
@@ -117,7 +350,8 @@ class ExecBackend(Protocol):
 Then implement:
 
 - `PantographPoolExecBackend`: exact current behavior, including one worker lease
-  per item. This makes the refactor behavior-preserving.
+  per busy item under the existing `max_workers` bound. This makes the refactor
+  behavior-preserving.
 - `PantographTaskExecBackend`: the future backend, initially hidden behind a
   config flag.
 
@@ -127,9 +361,15 @@ The route becomes backend-agnostic:
 2. Return `invalid_state_token` immediately for missing tokens.
 3. Group valid items by `(env_profile, header_hash, backend_kind,
    state_format)`.
-4. Call `backend.step_batch_group(...)` once per compatible group.
-5. Promote `child_path`s with `StateStore.create_child(parent_token, child_path)`.
-6. Merge group results back into original request order.
+4. Split each group into chunks no larger than
+   `max_items_per_worker_batch`.
+5. Submit compatible chunks through the existing bounded free/busy worker pool.
+   At most `max_workers` chunks may hold processes at once. If every item has a
+   different header, batching cannot merge those items, but the scheduler still
+   queues them instead of spawning one process per item.
+6. Call `backend.step_batch_group(...)` once per leased compatible chunk.
+7. Promote `child_path`s with `StateStore.create_child(parent_token, child_path)`.
+8. Merge group/chunk results back into original request order.
 
 This one route refactor is the real migration seam. Once it exists, Pantograph
 pool, Pantograph task backend, and a REPL fork can all plug into the same public
@@ -142,16 +382,70 @@ Acceptance for Phase 0:
 - New route tests prove mixed valid/invalid tokens preserve input order.
 - New grouping test proves two compatible items are passed to the backend in one
   group rather than independently scheduled by the route.
+- New fragmented-header test proves 16 incompatible headers are queued through
+  `max_workers`, not treated as an unbounded set of simultaneous worker leases.
 - `StateStore` records `backend_kind` and `state_format` from the start, and
   `resolve()` rejects tokens that cannot be loaded by the active backend.
 
-### Phase 0.5: Prove Lean Concurrency Is Feasible
+### Process Pool And Batch Chunks
 
-This gate comes before implementing a threaded `goal.step_batch`. The hard
-unknown is not the HTTP protocol; it is whether many `TermElabM` tactic runs can
-share one Mathlib-loaded Lean process without corrupting Lean runtime state.
+The new backend does not remove the worker pool. It changes the unit leased from
+the pool.
 
-Audit and spike these points against Lean 4.29.1 source:
+Current prototype:
+
+```text
+one step item -> one worker lease -> one Pantograph process
+```
+
+Task backend:
+
+```text
+one compatible batch chunk -> one worker lease -> one Lean/Pantograph process
+```
+
+If a request contains 64 compatible items and
+`max_items_per_worker_batch = 16`, the scheduler can use four workers, with each
+worker running one 16-item Lean-side batch command. If a request contains 16
+items with 16 different headers and `max_workers = 4`, the scheduler runs four
+single-item chunks at a time and queues the rest. The memory bound remains
+`max_workers * warm_process_rss`; batching improves throughput only when items
+share a compatible environment.
+
+For training, this means header discipline matters. Prefer canonical
+dataset/env-profile headers such as a shared Mathlib import profile. Tiny
+problem-specific headers fragment batches and reduce the benefit of Lean-side
+item parallelism.
+
+The caps have distinct jobs:
+
+| Cap | Layer | Meaning |
+| --- | --- | --- |
+| `max_items_per_step_batch` | HTTP/API | Maximum items accepted in one public `/exec/step_batch` request. |
+| `max_tactics_per_step_item` | HTTP/API | Maximum candidate tactics per proof-state item. |
+| `max_attempts_per_step_batch` | HTTP/API | Maximum `items * tactics` accepted before touching Lean. |
+| `max_items_per_worker_batch` | Scheduler | Maximum compatible items sent to one leased process command. |
+| `max_parallel_items_per_lean_process` / `maxParallelItems` | Lean command | Maximum item tasks running at once inside one process. Must be `<= max_items_per_worker_batch`. |
+| `max_lean_processes_per_env_profile` | Process pool | Upper bound on warm processes for one compatible environment. |
+
+The one-process target also creates head-of-line blocking: the Pantograph
+transport remains one command -> one response per process, so a 16 x 8 batch
+holds that process until the whole command returns. If same-profile latency
+matters, the mitigation is a measured small process cap such as 2-4, smaller
+worker chunks, or both. That is a latency tradeoff against the memory goal, not
+a reason to return to process-per-item scheduling.
+
+### Phase 0.5: Concurrency Evidence And Remaining Gates
+
+The basic one-process item-task shape has already passed a scratch spike: 16
+file-backed parent items, 8 tactics per item, one task per item, sequential
+tactics inside each item, `Core.wrapAsync`, `Runtime.markMultiThreaded`, and
+Mathlib loaded in one Pantograph process. Peak RSS was about 3.36GiB, not
+`16 * warm_process_rss`.
+
+That scratch result is enough to justify porting the item-task primitive into
+the fork. It is not enough to make the task backend default. These points still
+need committed tests and code-level decisions against Lean 4.29.1:
 
 1. Shared environment safety.
    - Imported declarations live in persistent compacted `.olean` regions, but
@@ -168,10 +462,10 @@ Audit and spike these points against Lean 4.29.1 source:
      unpickled Pantograph environment path to decide whether concurrent
      realization on a shared environment is safe.
 3. Async elaboration machinery.
-   - Investigate whether `Core.wrapAsync`, `Environment.addConstAsync`, and the
-     snapshot/async-env APIs can wrap one proof-state item execution.
-   - If those APIs apply to a reconstructed `GoalState`, use them rather than
-     raw shared-env `IO.asTask`.
+   - The scratch path used `Core.wrapAsync` around item execution, then
+     `.asTask` on the wrapped item action. Product code should keep this shape
+     unless a stronger isolated-environment branch is found.
+   - Do not use raw shared-env `IO.asTask` for tactic execution.
 4. Concurrent pickling.
    - `goalStatePickle` compacts object graphs. Test whether 16 item tasks can
      pickle children concurrently while referencing the shared imported
@@ -180,7 +474,7 @@ Audit and spike these points against Lean 4.29.1 source:
      alive, pickle serially on the main loop, then free parent regions. That
      fallback must be measured because it raises peak memory.
 
-Decisive micro-tests before Phase 2:
+Decisive micro-tests before making performance claims about `pantograph_task`:
 
 - Realization collision: run two or more concurrent items whose tactics force
   the same generated constant or instance, repeat enough times to catch
@@ -190,59 +484,84 @@ Decisive micro-tests before Phase 2:
 - `markMultiThreaded` cost: measure wall time and RSS for marking the post-Mathlib
   batch context, then compare single-thread tactic latency before and after.
 
-Phase 2 is allowed to start only after choosing one explicit concurrency model:
+The current implementation model is the scratch fallback:
 
-- preferred: per-item isolated environment branch through Lean's async
-  elaboration framework;
-- fallback: shared environment plus mandatory `markMultiThreaded`, with measured
-  cost and a passing realization-collision test;
-- blocked: neither path is safe, in which case a one-process task backend is not
-  viable and the next option is a lower-level Lean-native worker or a small fixed
-  process pool.
+- shared environment plus mandatory `markMultiThreaded` on the batch context;
+- `Core.wrapAsync` for each item task;
+- bounded `maxParallelItems`;
+- no mutation of `State.goalStates` from item tasks.
 
-### Phase 1: Add The Pantograph Fork Without Using Threads Yet
+If the remaining stress tests fail under that model, either switch to a
+per-item isolated environment branch or reject the one-process task backend. A
+Lean REPL fork is not an automatic escape hatch because it uses the same Lean
+runtime and compaction classes unless it introduces a different isolation
+strategy.
 
-Fork PyPantograph or vendor a repo-local modified `pantograph-repl`. Do not edit
-the uv cache. Point `pyproject.toml` at the fork only after the fork builds
-cleanly for Lean 4.29.1 and the current Mathlib pin.
+### Phase 1A: Port The Scratch Item-Task Primitive Into The Fork
 
-In the fork, add `goal.step_batch`, but first implement it sequentially inside
-Lean:
+The repo-local fork already exists at `third_party/PyPantograph`, and
+`pyproject.toml` already points `pantograph` at it. Do not return to editing uv
+cache checkouts.
+
+The next code slice is to add `goal.step_batch` to the fork by porting the
+scratch item-task model:
 
 1. Parse a batch request.
-2. For each item, load parent state from `path`.
-3. For each tactic, call the same internal logic as `goal_tactic`.
-4. Save open children to `outputDir`.
-5. Return one JSON response in deterministic `(itemIdx, tacticIdx)` order.
-6. Free unpickled `CompactedRegion`s after all dependent values are saved.
+2. Chunk items by `maxParallelItems`.
+3. For each item task, load exactly one parent state from `parentPath`.
+4. Loop over that item's tactics sequentially, always from the same parent.
+5. Save open children to unique files under `outputDir`.
+6. Return one JSON response in deterministic `(itemIdx, tacticIdx)` order.
+7. Preserve a debug path with `maxParallelItems = 1`; this is for isolating
+   bugs, not the target implementation.
+8. Track every `CompactedRegion` returned by `goalStateUnpickle`. The scratch
+   spike deliberately leaked those regions; committed code must keep parent
+   regions alive through tactic execution, child save, and goal serialization,
+   then defer freeing until the next command.
 
-This phase does not solve throughput yet. Its purpose is to prove the new
-protocol, state-file flow, and Python integration without adding thread-safety
-risk.
+For the first implementation, support only file-backed parents:
+
+```text
+GoalStepBatchItem.parentPath : System.FilePath
+```
+
+Do not accept resident `stateId` parents yet. Resident ids would pull
+`State.goalStates` and `goalStateRegions` into the concurrent path, which is
+exactly the shared mutable state this slice is trying to avoid. Public
+`state_token`s already resolve to files, so file-backed parents are sufficient
+for `/exec`.
 
 Python side:
 
 - Add `goal_step_batch_async(...)` to the forked PyPantograph wrapper.
-- Implement `PantographTaskExecBackend.step_batch_group(...)` by sending all
-  grouped items in one `goal.step_batch` command.
-- Keep `exec_backend=pantograph_pool` as the default while this is tested.
+- Keep the wrapper as one-command/one-response over stdin/stdout. Do not issue
+  overlapping Python calls into one Pantograph process.
+- Add direct wrapper tests before changing `server/routers/exec.py`.
 
-Acceptance for Phase 1:
+Acceptance for Phase 1A:
 
-- Sequential `goal.step_batch` matches repeated `goal.tactic` on Init examples.
-- Python `/exec/step_batch` can run through `exec_backend=pantograph_task` for
-  one item and multiple items.
+- `maxParallelItems = 1` matches repeated `goal.tactic` on Init examples.
+- Candidate tactics are independent: for example, in a parent where
+  `intro hp` would create a local hypothesis, a later candidate `exact hp`
+  must fail if it is run as a separate candidate from the original parent.
+- `maxParallelItems > 1` runs 2, 4, 8, then 16 independent parent items in one
+  Pantograph process.
+- 16 items x 8 tactics works against the same light Mathlib workload used in
+  the scratch spike, with memory metrics recorded.
+- Python can call `goal_step_batch_async(...)` directly and get child files that
+  reload and step later.
 - One compatible multi-item request uses one Pantograph subprocess and one
-  stdin/stdout command, not one command per item.
+  stdin/stdout command, not one command per item and not one process per item.
+- Repeated file-backed parent loads in `goal.step_batch` do not show unbounded
+  RSS growth, or the worker is recycled under a documented temporary
+  RSS/load-count cap while the region-lifetime bug is fixed.
 
-### Phase 2: Add Item-Level Lean Task Parallelism
+### Phase 1B: Implement Item-Level Lean Task Parallelism In `goal.step_batch`
 
-Do not start this phase until Phase 0.5 has selected a concrete Lean
-concurrency model. The implementation must either run item tasks in isolated
-environment branches through Lean's async elaboration machinery, or it must use
-a shared environment that has been explicitly marked multi-threaded and has
-passed the realization-collision tests. Raw `IO.asTask` over a shared,
-unmarked `Environment` is not an acceptable implementation.
+Use the scratch implementation model as the starting point: shared batch context
+marked with `Runtime.markMultiThreaded`, `Core.wrapAsync` around item execution,
+and bounded task fanout. Raw `IO.asTask` over a shared, unmarked `Environment`
+is not an acceptable implementation.
 
 The parallelism unit is the step item, not the tactic. A 16 item x 8 tactic
 request should become up to 16 Lean tasks in one process. Each item task owns one
@@ -293,6 +612,11 @@ Patch Pantograph in these places:
    - A batch item carries `itemIdx`, `parentPath`, `tactics`, optional `goalId`,
      and optional timeout.
    - The batch carries `outputDir` and `maxParallelItems`.
+   - Do not add result fields literally named `error`. `Protocol.lean` reserves
+     top-level `error` for `InteractionError`, and the Python wrapper currently
+     treats `"error" in result` as command failure. Use fields such as
+     `status`, `messages`, `parseError?`, or `failure?` for per-attempt
+     failures.
 
 2. `src/Repl.lean`
    - Add command dispatch: `"goal.step_batch" => run goal_step_batch`.
@@ -315,7 +639,7 @@ runTacticOnGoalState :
   GoalState ->
   Site ->
   String ->
-  IO RawTacticResult
+  CoreM RawTacticResult
 ```
 
 The helper is the same machinery used by current `goal_tactic`:
@@ -328,13 +652,25 @@ The helper is the same machinery used by current `goal_tactic`:
 - return `open`, `complete`, or `error` with the child `GoalState` only long
   enough to save it.
 
+Concrete extraction points from current `Repl.lean`:
+
+- `resolveSite(goalState, goalId?, autoResume?, options)` from the first part of
+  `goal_tactic`;
+- `runTacticAttempt(...)` from the `goalState.tryTactic` action branch;
+- `serializeAttemptResult(...)` from the success/failure formatting path,
+  including the existing `hasSorry` and `hasUnsafe` rejection logic.
+
+Put dispatch in `Repl.lean`, but move bulky non-dispatch helpers into a small
+Pantograph module if the implementation starts making `Repl.lean` harder to
+read.
+
 4. Add an item runner:
 
 ```lean
 runStepItem :
   BatchContext ->
   GoalStepBatchItem ->
-  IO GoalStepBatchItemResult
+  CoreM GoalStepBatchItemResult
 ```
 
 Its shape is:
@@ -342,25 +678,36 @@ Its shape is:
 ```lean
 def runStepItem ctx item := do
   let (parent, region) ← goalStateUnpickle item.parentPath (background? := some ctx.env)
-  try
-    let mut results := #[]
-    for h : tacticIdx in [:item.tactics.size] do
-      let tactic := item.tactics[tacticIdx]
-      let raw ← runTacticOnGoalState ctx parent item.site tactic
-      let result ← match raw with
-        | .open child goals messages =>
-            let childPath := childPathFor ctx.outputDir item.itemIdx tacticIdx
-            goalStatePickle child childPath (background? := some ctx.env)
-            pure { status := "open", childPath? := some childPath, goals, messages }
-        | .complete messages =>
-            pure { status := "complete", childPath? := none, goals := #[], messages }
-        | .error messages =>
-            pure { status := "error", childPath? := none, goals := #[], messages }
-      results := results.push { tacticIdx, tactic, result }
-    pure { itemIdx := item.itemIdx, results }
-  finally
-    region.free
+  let mut results := #[]
+  for h : tacticIdx in [:item.tactics.size] do
+    let tactic := item.tactics[tacticIdx]
+    let raw ← runTacticOnGoalState ctx parent item.site tactic
+    let result ← match raw with
+      | .open child goals messages =>
+          let childPath := childPathFor ctx.outputDir item.itemIdx tacticIdx
+          goalStatePickle child childPath (background? := some ctx.env)
+          pure { status := "open", childPath? := some childPath, goals, messages }
+      | .complete messages =>
+          pure { status := "complete", childPath? := none, goals := #[], messages }
+      | .error messages =>
+          pure { status := "error", childPath? := none, goals := #[], messages }
+    results := results.push { tacticIdx, tactic, result }
+  pure { itemIdx := item.itemIdx, results, parentRegion := region }
 ```
+
+This sketch is not yet a correct region-ownership implementation. The
+production version must not free `region` inside the item task. The item task
+should return only JSON-serializable attempt data plus a non-JSON parent-region
+handle to the main command. The main command should build the final response,
+append all returned parent regions to `releasedGoalStateRegions`, and let the
+existing deferred-release hook free them at the start of the next command.
+
+If Lean's type constraints make returning a `CompactedRegion` from item tasks
+awkward, use an equivalent command-local owner structure. The invariant is what
+matters: parent regions are alive through child save and goal serialization, no
+Lean object that references the parent escapes into JSON, and actual freeing is
+deferred out of the command frame. A temporary RSS/load-count recycle cap is
+acceptable only as a short-lived fallback while this owner structure is fixed.
 
 The important details:
 
@@ -374,16 +721,18 @@ The important details:
   that serial save completes.
 - The task does not allocate process-local ids and does not touch
   `State.goalStates`.
-- The task frees the parent `CompactedRegion` only after all children depending
-  on that region have been saved and no returned value still references the
-  region.
+- Region cleanup follows the selected ownership model above. The task must not
+  free a region merely because the loop ended.
 
 5. Spawn bounded item tasks:
 
 ```lean
 def runItemsChunk ctx items := do
+  discard <| Runtime.markMultiThreaded ctx.env
+  discard <| Runtime.markMultiThreaded ctx.coreContext
   let tasks ← items.mapM fun item =>
-    IO.asTask (runStepItem ctx item)
+    let wrapped ← Core.wrapAsync (runStepItem ctx item) (cancelTk? := none)
+    wrapped.asTask
   joinCompletedOnMainLoop tasks
 ```
 
@@ -397,30 +746,101 @@ The main command loop then concatenates chunks, sorts results by
 `(itemIdx, tacticIdx)`, deletes any temporary failed child files, and prints one
 JSON response.
 
-Acceptance for Phase 2:
+Also tighten the existing resident-region cleanup while touching `Repl.lean`:
+dedupe `goal.delete` ids before collecting regions. Duplicate ids should not be
+able to enqueue the same `CompactedRegion` twice.
+
+Acceptance for Phase 1B:
 
 - 2, 4, 8, then 16 different parent items run concurrently in one process.
 - Each item still tries its 8 tactics sequentially.
 - 16 parent items x 8 tactics succeeds in one process with `maxParallelItems`
   capped.
+- Results are deterministic in `(itemIdx, tacticIdx)` order.
+- Every open child path can be loaded and stepped in a later command.
 - Bad tactics and cooperative timeouts are per-attempt errors. Non-cooperative
   tactics may still require process kill/restart, which loses the whole batch;
   that limitation must be explicit in the API/metrics.
+- Invalid parent path affects only that item.
 - Worker remains usable after mixed success/error batches.
 
-### Phase 3: Add Resource Caps And Metrics Before Defaulting
+Batching increases failure blast radius. In the current compatibility backend,
+a non-cooperative tactic normally kills the worker leased for that one item. In
+`pantograph_task`, the same process owns the whole compatible chunk, so a
+process-level kill loses all sibling attempts in that chunk. This makes
+per-attempt cooperative cancellation, moderate chunk sizes, and clear retry
+semantics design constraints rather than nice-to-have metrics.
 
-Add backend settings before the task backend becomes default:
+### Phase 2: Add The Server Backend Seam And `pantograph_task`
+
+Once direct PyPantograph `goal_step_batch_async(...)` tests pass, refactor the
+server. The current code path is:
+
+```text
+server/routers/exec.py
+  step_one(item)
+  -> StateStore.resolve(item.state_token)
+  -> PantographManager.get_worker(env_profile, header)
+  -> PantographWorker.step_state_with_tactics(record.path, item.tactics)
+  -> StateStore.create_child(parent_token, child_path)
+```
+
+That is the compatibility behavior to preserve as `pantograph_pool`: bounded by
+`max_workers`, but scaling throughput by occupying more warm workers.
+
+Use the backend seam and route algorithm defined in Phase 0. The new work in
+this phase is wiring `PantographTaskExecBackend` to the already-tested
+`goal_step_batch_async(...)` wrapper, then making the route select it behind an
+`exec_backend=pantograph_task` setting.
+
+Before resolving many tokens and then running chunks asynchronously, decide how
+state deletion races are prevented. Today `StateStore.resolve()` refreshes the
+access time, while `/exec/cleanup` and storage-budget GC can delete files by
+item id or LRU. For chunked execution, add state-token pinning/in-flight leases
+or make the API contract explicit that cleanup for an item id must not race
+active steps for that same item id. Pinning is preferable for server-side
+correctness.
+
+State-store work before enabling multiple backend kinds:
+
+- add `backend_kind` and `state_format` to `StateRecord` sidecars;
+- default existing Pantograph files to
+  `backend_kind = "pantograph_pool"` and
+  `state_format = "pantograph_goal_state_file"`;
+- make child tokens inherit the parent's backend metadata;
+- reject or route tokens whose format the selected backend cannot load.
+
+Acceptance for Phase 2:
+
+- existing `/exec/create_states -> /exec/step_batch -> /exec/cleanup` tests pass
+  under `pantograph_pool`;
+- new grouping tests prove compatible items are passed to one backend chunk;
+- fragmented-header tests prove incompatible items are queued through
+  `max_workers`, not launched as unlimited processes;
+- `pantograph_task` works behind a flag for Init examples and the direct
+  16 x 8 light Mathlib case;
+- mixed valid/invalid tokens preserve input order.
+- backend/state-format mismatches are rejected or routed explicitly;
+- active token pinning or the cleanup race contract is covered by tests.
+
+### Phase 3: Add Resource Caps And Metrics
+
+Backend settings now exist, but `pantograph_task` is not the default. The
+remaining Phase 3 work is production metrics, especially chunk latency,
+per-attempt latency, and worker RSS.
 
 ```text
 exec_backend = pantograph_pool | pantograph_task | repl_task
 max_items_per_step_batch = 16
 max_tactics_per_step_item = 8
 max_attempts_per_step_batch = 128
+max_items_per_worker_batch = 16
 max_parallel_items_per_lean_process = measured value
-max_lean_processes_per_env_profile = 1 initially, with 2-4 as an explicit
-                                     fallback if one process cannot satisfy the
-                                     absolute memory and latency budget
+max_lean_processes_per_env_profile = -1 by default for pantograph_pool;
+                                     set to 1 initially when enabling
+                                     pantograph_task, with 2-4 as an explicit
+                                     fallback if one process cannot satisfy
+                                     the absolute memory and latency budget
 ```
 
 Reject over-cap requests before Lean work starts.
@@ -536,7 +956,9 @@ Lean-side Pantograph is also currently sequential at the command loop:
 - `goal_save`, `goal_load`, and `goal_delete` already provide the file-backed
   state lifecycle.
 
-Source pointers:
+Source pointers below refer to the pinned upstream tree before the repo-local
+fork edits. The local fork has shifted some line numbers, especially in
+`src/Repl.lean`, because of the `CompactedRegion` ownership patch.
 
 - `src/Main.lean:34-50`: stdin loop executes one command and prints one response.
 - `src/Repl.lean:14-24`: process-local state contains `goalStates`.
@@ -672,6 +1094,10 @@ Source pointers in local Lean 4.29.1:
 
 ## Preferred Route: Pantograph Fork With `goal.step_batch`
 
+This section is a condensed implementation summary. The authoritative
+phase-by-phase plan is `Phase 1A`, `Phase 1B`, and `Phase 2` above; keep this
+section aligned with those phases rather than adding a second divergent plan.
+
 Pantograph should be tried first because it already matches our current
 `state_token` design:
 
@@ -705,8 +1131,9 @@ Add batch request/response structures in `src/Pantograph/Protocol.lean`.
 The batch request should contain:
 
 - `items`: array of proof-state expansion items.
-- each item has `itemIdx`, parent by `stateId?` or `path?`, `tactics`, optional
-  `goalId`, and optional timeout.
+- each item has `itemIdx`, file-backed `parentPath`, `tactics`, optional
+  `goalId`, and optional timeout. Do not support resident `stateId` parents in
+  the first implementation.
 - `outputDir`: directory where child states should be saved.
 - `maxParallelItems`: hard cap on concurrent item tasks inside the process.
 
@@ -729,12 +1156,12 @@ Do not call the existing `goal_tactic` command from item tasks. It mutates
 one item task can call sequentially for each tactic:
 
 ```lean
-runGoalAttemptIO :
+runGoalAttemptCoreM :
   BatchContext ->
   GoalState ->
   Site ->
   String ->
-  IO AttemptRawResult
+  CoreM AttemptRawResult
 ```
 
 The helper should be built from existing Pantograph pieces:
@@ -772,7 +1199,7 @@ The region is a real memory safety issue. Pantograph's `Serial.lean` says the
    that keeps the region alive until serialization finishes.
 4. Drop all references to the unpickled parent and children that depend on the
    region.
-5. Free the region.
+5. Enqueue the parent region for deferred release at the next command boundary.
 6. Run resident-state deletion for anything not intentionally cached.
 
 For repeated tactics on the same parent, load the parent once inside the item
@@ -784,10 +1211,11 @@ tasks in the first implementation.
 The backend must enforce both HTTP-level and Lean-level caps:
 
 ```text
-max_items_per_batch = 16
-max_tactics_per_item = 8
-max_attempts_per_batch = 128
-max_parallel_items = measured, probably 8 or 16 initially
+max_items_per_step_batch = 16
+max_tactics_per_step_item = 8
+max_attempts_per_step_batch = 128
+max_items_per_worker_batch = 16
+max_parallel_items_per_lean_process = measured, probably 8 or 16 initially
 max_lean_processes_per_env_profile = 1 for the spike
 ```
 
@@ -844,6 +1272,9 @@ process-local ids.
 
 ## Fallback Route: Lean REPL Fork
 
+This is the same fallback described in Phase 5, repeated here only to make the
+state-token implications explicit.
+
 If Pantograph fails for Pantograph-specific reasons after Phase 0.5 proves the
 Lean concurrency model, fork Lean REPL and add the same primitive there.
 
@@ -862,8 +1293,8 @@ For the state-token case, use the `backend_kind` / `state_format` metadata added
 in Phase 0:
 
 ```text
-backend_kind = pantograph_task | repl_task
-state_format = pantograph_goalstate_v1 | repl_proofsnapshot_v1
+backend_kind = pantograph_pool | pantograph_task | repl_task
+state_format = pantograph_goal_state_file | repl_proofsnapshot_v1
 ```
 
 `StateStore.resolve` should reject or route tokens whose `state_format` does not
@@ -891,15 +1322,18 @@ Do not use these as the scalable design:
 - A Kimina manager job per tactic. It reproduces the process explosion we are
   trying to eliminate.
 
-## Decisive Spike Tests
+## Productization Tests
 
-These tests decide whether the Pantograph route is viable.
+These tests decide whether the scratch Pantograph route has been productized
+well enough to use behind `/exec`.
 
-### Test 0: Lean Runtime Concurrency Gates
+### Test 0: Remaining Lean Runtime Gates
 
-Before testing `goal.step_batch` semantics, run the Phase 0.5 gates:
+The scratch spike has already justified implementing `goal.step_batch`. Before
+making `pantograph_task` default, commit and run these gates:
 
-- shared-env or isolated-env execution model chosen and documented;
+- shared-env plus `markMultiThreaded`/`Core.wrapAsync`, or a stronger isolated
+  environment model, is chosen and documented;
 - realization-collision stress test passes repeatedly;
 - concurrent child-state pickle test passes, or serial child-state pickling is
   selected with a measured memory cost;
@@ -930,6 +1364,8 @@ Expected:
 - `rw [Nat.add_comm]` returns `open` with goal `n : Nat\n|- 0 + n = n`;
 - `bad_tactic` returns `error`;
 - sequential `goal_tactic` and batch `goal.step_batch` agree.
+- candidate tactics are independent: a later candidate cannot depend on a local
+  hypothesis introduced by an earlier candidate in the same item.
 
 ### Test B: Multiple Items, Sequential Tactics Per Item
 
@@ -944,7 +1380,7 @@ Pass condition:
 - logs/metrics show one Lean task per item, not one task per tactic;
 - within each item, tactics run sequentially against that item's parent state;
 - all returned child states can be loaded and stepped later;
-- resident `goalStates` count returns to baseline after deletion.
+- `State.goalStates` is not mutated by item tasks.
 
 This is the first real thread-safety test for multiple item-owned parent
 `GoalState`s running concurrently inside one process.
@@ -960,6 +1396,11 @@ Pass condition:
 - no 16-process fanout;
 - errors do not poison sibling items;
 - all open children are saved and reusable by later requests.
+- concurrent batch commands write child files under distinct per-command output
+  directories, so deterministic Lean child filenames cannot collide across
+  requests;
+- the parent input is file-backed `parentPath`; resident `stateId` parents are
+  intentionally not part of the first implementation.
 
 ### Test D: Memory Bound
 
@@ -977,6 +1418,8 @@ Pass condition:
 - residual RSS is explained by resident state, compacted regions, or allocator
   retention rather than treated as a simple pass/fail baseline return;
 - state-store bytes are tracked separately from process RSS.
+- repeated batch parent loads do not show unbounded growth; duplicate
+  `goal.delete` ids do not double-free a resident region.
 
 ### Test E: Bad Tactics And Timeouts
 
@@ -993,7 +1436,10 @@ Pass condition:
 
 ## Decision Rule
 
-Proceed with the Pantograph fork only if Test 0 and Tests A through E pass.
+Proceed with `pantograph_task` server integration after Tests A through E pass
+directly against the forked PyPantograph wrapper. Make `pantograph_task` the
+default only after Test 0 also passes in committed stress tests and the real
+Goedel-mined frontier benchmark passes end to end.
 
 If Tests A or B fail for Pantograph-specific `GoalState` reasons after Test 0
 has passed, pivot to the Lean REPL fork and repeat the same tests with

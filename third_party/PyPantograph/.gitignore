@@ -1,0 +1,13 @@
+.*
+!.gitignore
+!.github
+
+# Python
+*.py[cod]
+*.egg-info
+
+# Output
+/dist
+/venv
+/pantograph/pantograph-repl
+/src/.lake

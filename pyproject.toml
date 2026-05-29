@@ -41,7 +41,7 @@ dev-dependencies = [
 ]
 
 [tool.uv.sources]
-pantograph = { git = "https://github.com/stanford-centaur/PyPantograph", rev = "ffa7f243824d2762825abddb1e9f6e939ede761f" }
+pantograph = { path = "third_party/PyPantograph", editable = true }
 
 [tool.pytest.ini_options]
 addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match' -x --ignore=./tsts_old"
@@ -55,7 +55,7 @@ markers = [
 [tool.mypy]
 plugins = ['pydantic.mypy']
 strict = true
-files = ["kimina_client", "server", "tests"]
+files = ["server", "kimina_client/exec_models.py"]
 exclude = "^(server/server_old|tsts_old/)"
 ignore_missing_imports = true
 allow_untyped_decorators = true

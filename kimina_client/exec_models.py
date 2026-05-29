@@ -31,10 +31,14 @@ class ExecStateInfo(BaseModel):
     goals: list[str] = Field(default_factory=list)
 
 
+def _empty_exec_state_infos() -> list[ExecStateInfo]:
+    return []
+
+
 class ExecCreateStatesResult(BaseModel):
     item_id: str
     status: ExecStatus
-    states: list[ExecStateInfo] = Field(default_factory=list)
+    states: list[ExecStateInfo] = Field(default_factory=_empty_exec_state_infos)
     messages: list[str] = Field(default_factory=list)
 
 
@@ -68,9 +72,13 @@ class ExecStepResult(BaseModel):
     messages: list[str] = Field(default_factory=list)
 
 
+def _empty_exec_step_results() -> list[ExecStepResult]:
+    return []
+
+
 class ExecStepBatchResult(BaseModel):
     node_id: str
-    results: list[ExecStepResult] = Field(default_factory=list)
+    results: list[ExecStepResult] = Field(default_factory=_empty_exec_step_results)
 
 
 class ExecStepBatchResponse(BaseModel):

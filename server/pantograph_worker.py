@@ -4,12 +4,13 @@ import asyncio
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import pantograph
+import pantograph  # type: ignore[reportMissingTypeStubs]
 
 from .pantograph_normalize import (
     exception_to_messages,
+    goal_payloads_to_goal_texts,
     goal_state_to_goal_texts,
     messages_to_texts,
 )
@@ -22,11 +23,23 @@ class PantographSavedState:
     goals: list[str]
 
 
+def _empty_saved_states() -> list[PantographSavedState]:
+    return []
+
+
+def _empty_step_results() -> list[PantographStepResult]:
+    return []
+
+
+def _empty_strings() -> list[str]:
+    return []
+
+
 @dataclass(frozen=True)
 class PantographCreateResult:
     status: ExecStatus
-    states: list[PantographSavedState] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
+    states: list[PantographSavedState] = field(default_factory=_empty_saved_states)
+    messages: list[str] = field(default_factory=_empty_strings)
 
 
 @dataclass(frozen=True)
@@ -34,8 +47,21 @@ class PantographStepResult:
     tactic: str
     status: ExecStatus
     state_path: Path | None = None
-    goals: list[str] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
+    goals: list[str] = field(default_factory=_empty_strings)
+    messages: list[str] = field(default_factory=_empty_strings)
+
+
+@dataclass(frozen=True)
+class PantographBatchStepInput:
+    item_index: int
+    state_path: Path
+    tactics: list[str]
+
+
+@dataclass(frozen=True)
+class PantographBatchStepItemResult:
+    item_index: int
+    results: list[PantographStepResult] = field(default_factory=_empty_step_results)
 
 
 class PantographWorker:
@@ -121,6 +147,75 @@ class PantographWorker:
             )
         return results
 
+    async def step_state_batch_with_tactics(
+        self,
+        items: list[PantographBatchStepInput],
+        *,
+        state_dir: Path,
+        max_parallel_items: int,
+    ) -> list[PantographBatchStepItemResult]:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = [
+                {
+                    "itemIdx": item.item_index,
+                    "parentPath": str(item.state_path),
+                    "tactics": item.tactics,
+                }
+                for item in items
+            ]
+            response = await self._server.goal_step_batch_async(
+                payload,
+                output_dir=str(state_dir),
+                max_parallel_items=max_parallel_items,
+            )
+        except Exception as exc:
+            messages = exception_to_messages(exc)
+            return [
+                PantographBatchStepItemResult(
+                    item_index=item.item_index,
+                    results=[
+                        PantographStepResult(
+                            tactic=tactic,
+                            status="error",
+                            messages=messages,
+                        )
+                        for tactic in item.tactics
+                    ],
+                )
+                for item in items
+            ]
+
+        input_by_index = {item.item_index: item for item in items}
+        returned: dict[int, PantographBatchStepItemResult] = {}
+        for item_result in response.get("items", []):
+            item_index = int(item_result["itemIdx"])
+            attempts = item_result.get("results", [])
+            returned[item_index] = PantographBatchStepItemResult(
+                item_index=item_index,
+                results=[self._parse_batch_attempt(attempt) for attempt in attempts],
+            )
+
+        results: list[PantographBatchStepItemResult] = []
+        for item in items:
+            if item.item_index in returned:
+                results.append(returned[item.item_index])
+                continue
+            results.append(
+                PantographBatchStepItemResult(
+                    item_index=item.item_index,
+                    results=[
+                        PantographStepResult(
+                            tactic=tactic,
+                            status="error",
+                            messages=["Pantograph batch did not return item result"],
+                        )
+                        for tactic in input_by_index[item.item_index].tactics
+                    ],
+                )
+            )
+        return results
+
     def is_alive(self) -> bool:
         """Whether the underlying Pantograph subprocess is still usable.
 
@@ -195,6 +290,26 @@ class PantographWorker:
                 status="error",
                 messages=exception_to_messages(exc),
             )
+
+    @staticmethod
+    def _parse_batch_attempt(payload: dict[str, Any]) -> PantographStepResult:
+        status = payload.get("status")
+        if status not in {"open", "complete", "error"}:
+            status = "error"
+        messages = messages_to_texts(payload.get("messages", []))
+        for key in ("failure", "parseError"):
+            if payload.get(key):
+                messages.append(str(payload[key]))
+        child_path = None
+        if payload.get("childPath"):
+            child_path = Path(payload["childPath"])
+        return PantographStepResult(
+            tactic=str(payload.get("tactic", "")),
+            status=cast(ExecStatus, status),
+            state_path=child_path,
+            goals=goal_payloads_to_goal_texts(payload.get("goals", [])),
+            messages=messages,
+        )
 
     @staticmethod
     def _allocate_state_path(state_dir: Path) -> Path:

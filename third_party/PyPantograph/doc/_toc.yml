@@ -1,0 +1,16 @@
+format: jb-book
+root: intro
+parts:
+- caption: Features
+  chapters:
+  - file: setup
+  - file: goal
+  - file: agent-search
+  - file: frontend
+- caption: API Documentation
+  chapters:
+  - file: api-message
+  - file: api-server
+  - file: api-expr
+  - file: api-data
+  - file: api-search

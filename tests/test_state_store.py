@@ -47,6 +47,8 @@ def test_put_moves_file_and_records_metadata(tmp_path: Path) -> None:
     assert record.env_profile == "lean4.29.1_mathlib_x"
     assert record.header == "import Mathlib"
     assert record.header_hash == "abc123"
+    assert record.backend_kind == "pantograph_pool"
+    assert record.state_format == "pantograph_goal_state_file"
     assert record.path == tmp_path / "store" / "st_root.bin"
     assert record.path.read_bytes() == b"root-state"
     assert record.size_bytes == len(b"root-state")
@@ -88,6 +90,8 @@ def test_create_child_inherits_parent_metadata(tmp_path: Path) -> None:
         env_profile="lean4.29.1_mathlib_x",
         header="import Mathlib",
         header_hash="abc123",
+        backend_kind="pantograph_task",
+        state_format="pantograph_goal_state_file",
     )
 
     child = store.create_child(parent, _write_state(tmp_path / "child.bin", b"child"))
@@ -97,6 +101,8 @@ def test_create_child_inherits_parent_metadata(tmp_path: Path) -> None:
     assert child_record.env_profile == "lean4.29.1_mathlib_x"
     assert child_record.header == "import Mathlib"
     assert child_record.header_hash == "abc123"
+    assert child_record.backend_kind == "pantograph_task"
+    assert child_record.state_format == "pantograph_goal_state_file"
     assert child_record.path.read_bytes() == b"child"
     assert store.stats().state_count == 2
 
@@ -133,6 +139,40 @@ def test_delete_by_item_id_deletes_only_owned_files(tmp_path: Path) -> None:
     assert not (tmp_path / "store" / f"{a1}.bin").exists()
     assert not (tmp_path / "store" / f"{a2}.bin").exists()
     assert store.resolve(b1).path.exists()
+
+
+def test_pinned_states_are_not_deleted_until_unpinned(tmp_path: Path) -> None:
+    store = StateStore(
+        tmp_path / "store",
+        token_factory=_token_factory("st_root", "st_child"),
+    )
+    root = store.put(
+        _write_state(tmp_path / "root.bin", b"root"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+    child = store.put(
+        _write_state(tmp_path / "child.bin", b"child"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    pinned = store.resolve_and_pin(root)
+    deleted = store.delete_by_item_id("theorem_42:a0")
+
+    assert pinned.state_token == root
+    assert deleted.deleted_states == 1
+    assert store.resolve(root).path.exists()
+    with pytest.raises(StateTokenNotFound):
+        store.resolve(child)
+
+    store.unpin(root)
+    deleted = store.delete_by_item_id("theorem_42:a0")
+
+    assert deleted.deleted_states == 1
+    assert store.stats().state_count == 0
 
 
 def test_gc_expired_deletes_stale_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,6 +325,32 @@ def test_gc_sweeps_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert deleted.deleted_states == 2  # tracked "live" + orphan scratch file
     assert deleted.deleted_bytes == len(b"live") + len(b"orphan")
     assert store.stats().state_count == 0
+
+
+def test_gc_sweeps_stale_batch_output_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    root = tmp_path / "store"
+    store = StateStore(root, ttl_seconds=10)
+    monkeypatch.setattr(store, "_now", lambda: now)
+
+    batch_dir = root / "pg_batch_leftover"
+    batch_dir.mkdir()
+    _write_state(batch_dir / "item_0_tactic_0.bin", b"child")
+    stale = (now - timedelta(seconds=60)).timestamp()
+    os.utime(batch_dir / "item_0_tactic_0.bin", (stale, stale))
+    os.utime(batch_dir, (stale, stale))
+
+    now = now + timedelta(seconds=11)
+    deleted = store.gc_expired()
+
+    assert deleted.deleted_states == 1
+    assert deleted.deleted_bytes == len(b"child")
+    assert not batch_dir.exists()
 
 
 @pytest.mark.asyncio

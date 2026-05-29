@@ -105,6 +105,43 @@ async def test_pantograph_manager_times_out_when_all_workers_are_busy() -> None:
     await manager.cleanup()
 
 
+async def test_pantograph_manager_caps_workers_per_env_profile() -> None:
+    manager = PantographManager(
+        max_workers=2,
+        max_workers_per_env_profile=1,
+        worker_factory=FakeWorkerFactory(),
+    )
+    await manager.get_worker(env_profile="env_a", header="", timeout=1)
+
+    with pytest.raises(NoAvailablePantographWorkerError, match="Timed out"):
+        await manager.get_worker(env_profile="env_a", header="", timeout=0.001)
+
+    other = await manager.get_worker(env_profile="env_b", header="", timeout=1)
+    assert other.env_profile == "env_b"
+
+    await manager.cleanup()
+
+
+async def test_pantograph_manager_replaces_idle_same_env_worker_under_env_cap() -> None:
+    factory = FakeWorkerFactory()
+    manager = PantographManager(
+        max_workers=2,
+        max_workers_per_env_profile=1,
+        worker_factory=factory,
+    )
+
+    first = await manager.get_worker(env_profile="env", header="import A", timeout=1)
+    await manager.release_worker(first)
+    second = await manager.get_worker(env_profile="env", header="import B", timeout=1)
+
+    assert second is not first
+    assert first.worker.closed
+    assert len(factory.calls) == 2
+
+    await manager.release_worker(second)
+    await manager.cleanup()
+
+
 async def test_pantograph_manager_closes_exhausted_worker_on_release() -> None:
     factory = FakeWorkerFactory()
     manager = PantographManager(

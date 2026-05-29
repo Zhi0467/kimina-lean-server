@@ -51,6 +51,97 @@ async def test_pantograph_worker_creates_and_steps_real_state(
     assert results[2].messages
 
 
+async def test_goal_step_batch_direct_wrapper_steps_items_in_one_process(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    assert created.status == "open"
+    parent_path = created.states[0].path
+
+    result = await pantograph_worker._server.goal_step_batch_async(
+        [
+            {
+                "itemIdx": idx,
+                "parentPath": str(parent_path),
+                "tactics": ["simp", "rw [Nat.add_comm]", "bad_tactic"],
+            }
+            for idx in range(2)
+        ],
+        output_dir=str(tmp_path),
+        max_parallel_items=2,
+    )
+
+    assert [item["itemIdx"] for item in result["items"]] == [0, 1]
+    for item in result["items"]:
+        assert [attempt["status"] for attempt in item["results"]] == [
+            "complete",
+            "open",
+            "error",
+        ]
+        child_path = Path(item["results"][1]["childPath"])
+        assert child_path.exists()
+
+        resumed = await pantograph_worker.step_state_with_tactics(
+            child_path,
+            ["simp"],
+            state_dir=tmp_path,
+        )
+        assert resumed[0].status == "complete"
+
+
+async def test_goal_step_batch_direct_wrapper_handles_16_by_8_capacity(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    assert created.status == "open"
+    tactics = [
+        "have h : n = n := rfl",
+        "simp",
+        "rw [Nat.add_zero]",
+        "bad_tactic",
+        "have h : n = n := rfl",
+        "simp",
+        "rw [Nat.add_zero]",
+        "bad_tactic",
+    ]
+
+    result = await pantograph_worker._server.goal_step_batch_async(
+        [
+            {
+                "itemIdx": idx,
+                "parentPath": str(created.states[0].path),
+                "tactics": tactics,
+            }
+            for idx in range(16)
+        ],
+        output_dir=str(tmp_path),
+        max_parallel_items=16,
+    )
+
+    assert len(result["items"]) == 16
+    for item in result["items"]:
+        assert [attempt["status"] for attempt in item["results"]] == [
+            "open",
+            "complete",
+            "complete",
+            "error",
+            "open",
+            "complete",
+            "complete",
+            "error",
+        ]
+        assert Path(item["results"][0]["childPath"]).exists()
+        assert Path(item["results"][4]["childPath"]).exists()
+
+
 async def test_pantograph_gc_preserves_saved_state_files(
     pantograph_worker: PantographWorker,
     tmp_path: Path,

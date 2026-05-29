@@ -1,8 +1,8 @@
 {
   "typeCheckingMode": "strict",
-  "include": ["server", "client"],
-  "exclude": ["tests", "tsts_old"], // Used by CLI
-  "ignore": ["tests", "tsts_old"], // Used by Pylance in VS Code
+  "include": ["server", "kimina_client/exec_models.py"],
+  "exclude": ["server/server_old", "tests", "tsts_old"], // Used by CLI
+  "ignore": ["server/server_old", "tests", "tsts_old"], // Used by Pylance in VS Code
   "reportMissingImports": true,
   "venvPath": ".",
   "venv": ".venv"
