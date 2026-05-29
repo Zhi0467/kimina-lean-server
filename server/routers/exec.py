@@ -25,12 +25,17 @@ from ..schemas_exec import (
     CreateStatesRequest,
     CreateStatesResponse,
     CreateStatesResult,
+    ExecSettingsStats,
+    ExecStatsResponse,
+    PantographPoolStats,
+    PantographWorkerStats,
     StateInfo,
+    StateStoreStatsResponse,
     StepBatchRequest,
     StepBatchResponse,
 )
 from ..split import split_snippet
-from ..settings import Settings
+from ..settings import Settings, effective_max_lean_processes_per_env_profile
 from ..state_store import StateStore
 
 router = APIRouter(prefix="/exec")
@@ -57,6 +62,7 @@ async def create_states(
     request: CreateStatesRequest,
     state_store: StateStore = Depends(get_state_store),
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> CreateStatesResponse:
     async def create_one(item: CreateStatesItem) -> CreateStatesResult:
@@ -82,6 +88,7 @@ async def create_states(
                         env_profile=request.env_profile,
                         header=split_result.header,
                         header_hash=item_header_hash,
+                        backend_kind=settings.exec_backend,
                     ),
                     goals=state.goals,
                 )
@@ -170,3 +177,66 @@ async def cleanup(
             )
         )
     return CleanupResponse(deleted_items=deleted_items)
+
+
+@router.get(
+    "/stats",
+    response_model=ExecStatsResponse,
+    response_model_exclude_none=True,
+)
+async def stats(
+    state_store: StateStore = Depends(get_state_store),
+    pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    settings: Settings = Depends(get_settings),
+    _api_key: str | None = Depends(require_key),
+) -> ExecStatsResponse:
+    pool_stats = await pantograph_manager.stats()
+    store_stats = state_store.stats()
+    effective_profile_cap = effective_max_lean_processes_per_env_profile(settings)
+    return ExecStatsResponse(
+        settings=ExecSettingsStats(
+            exec_backend=settings.exec_backend,
+            max_pantograph_workers=settings.max_pantograph_workers,
+            max_lean_processes_per_env_profile=(
+                settings.max_lean_processes_per_env_profile
+            ),
+            effective_max_lean_processes_per_env_profile=effective_profile_cap,
+            pantograph_worker_startup_timeout_seconds=(
+                settings.pantograph_worker_startup_timeout_seconds
+            ),
+            max_items_per_step_batch=settings.max_items_per_step_batch,
+            max_tactics_per_step_item=settings.max_tactics_per_step_item,
+            max_attempts_per_step_batch=settings.max_attempts_per_step_batch,
+            max_items_per_worker_batch=settings.max_items_per_worker_batch,
+            max_parallel_items_per_lean_process=(
+                settings.max_parallel_items_per_lean_process
+            ),
+        ),
+        pantograph_pool=PantographPoolStats(
+            max_workers=pool_stats.max_workers,
+            max_workers_per_env_profile=pool_stats.max_workers_per_env_profile,
+            worker_startup_timeout_seconds=(
+                pool_stats.worker_startup_timeout_seconds
+            ),
+            free_workers=pool_stats.free_workers,
+            busy_workers=pool_stats.busy_workers,
+            starting_workers=pool_stats.starting_workers,
+            total_workers=pool_stats.total_workers,
+            workers_by_env_profile=pool_stats.workers_by_env_profile,
+            workers=[
+                PantographWorkerStats(
+                    env_profile=worker.env_profile,
+                    header_hash=worker.header_hash,
+                    status=worker.status,
+                    use_count=worker.use_count,
+                    pid=worker.pid,
+                    rss_bytes=worker.rss_bytes,
+                )
+                for worker in pool_stats.workers
+            ],
+        ),
+        state_store=StateStoreStatsResponse(
+            state_count=store_stats.state_count,
+            total_bytes=store_stats.total_bytes,
+        ),
+    )

@@ -51,6 +51,30 @@ async def test_pantograph_worker_creates_and_steps_real_state(
     assert results[2].messages
 
 
+async def test_text_tactic_suggestions_use_tactic_file_map(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "-- a₀\n"
+        "theorem t (n : Nat) : n + 0 = n := by\n"
+        "  sorry",
+        state_dir=tmp_path,
+    )
+    assert created.status == "open"
+
+    results = await pantograph_worker.step_state_with_tactics(
+        created.states[0].path,
+        ["simp?"],
+        state_dir=tmp_path,
+    )
+
+    assert results[0].status == "complete"
+    assert results[0].messages == [
+        "1:0-1:5: Try this:\n  [apply] simp only [Nat.add_zero]"
+    ]
+
+
 async def test_goal_step_batch_direct_wrapper_steps_items_in_one_process(
     pantograph_worker: PantographWorker,
     tmp_path: Path,
@@ -140,6 +164,44 @@ async def test_goal_step_batch_direct_wrapper_handles_16_by_8_capacity(
         ]
         assert Path(item["results"][0]["childPath"]).exists()
         assert Path(item["results"][4]["childPath"]).exists()
+
+
+async def test_goal_step_batch_direct_wrapper_is_equivalent_across_parallel_caps(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    assert created.status == "open"
+    tactics = [
+        "have h : n = n := rfl",
+        "simp",
+        "rw [Nat.add_zero]",
+        "bad_tactic",
+    ]
+    items = [
+        {
+            "itemIdx": idx,
+            "parentPath": str(created.states[0].path),
+            "tactics": tactics,
+        }
+        for idx in range(4)
+    ]
+
+    sequential = await pantograph_worker._server.goal_step_batch_async(
+        items,
+        output_dir=str(tmp_path / "seq"),
+        max_parallel_items=1,
+    )
+    parallel = await pantograph_worker._server.goal_step_batch_async(
+        items,
+        output_dir=str(tmp_path / "par"),
+        max_parallel_items=4,
+    )
+
+    assert _compact_batch_result(sequential) == _compact_batch_result(parallel)
 
 
 async def test_pantograph_gc_preserves_saved_state_files(
@@ -251,3 +313,17 @@ async def test_is_alive_tracks_subprocess_state(
     assert pantograph_worker.is_alive() is True
     await pantograph_worker.aclose()
     assert pantograph_worker.is_alive() is False
+
+
+def _compact_batch_result(result: dict) -> list[list[tuple[str, str, bool]]]:
+    return [
+        [
+            (
+                str(attempt["tactic"]),
+                str(attempt["status"]),
+                bool(attempt.get("childPath")),
+            )
+            for attempt in item["results"]
+        ]
+        for item in result["items"]
+    ]

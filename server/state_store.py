@@ -71,7 +71,7 @@ class StateStore:
             raise ValueError("ttl_seconds must be positive")
         if max_bytes < -1:
             raise ValueError("max_bytes must be -1 or non-negative")
-        self.root_dir = root_dir
+        self.root_dir = root_dir.expanduser().resolve()
         self.ttl = timedelta(seconds=ttl_seconds)
         self.max_bytes = max_bytes
         self._token_factory = token_factory or self._default_token

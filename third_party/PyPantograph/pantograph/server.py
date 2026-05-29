@@ -167,7 +167,11 @@ class Server:
             ready = ready.decode().strip()
             assert ready == "ready.", f"Server failed to emit ready signal: {ready}; This could be caused by Lean version mismatch between the project and Pantograph or insufficient timeout."
         except asyncio.TimeoutError as ex:
+            self._close()
             raise RuntimeError("Server failed to emit ready signal in time") from ex
+        except AssertionError:
+            self._close()
+            raise
 
         if self.options:
             await self.run_async("options.set", self.options)

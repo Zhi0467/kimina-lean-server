@@ -441,6 +441,18 @@ def runGoalStepBatchItem
         parentRegion? := .some region,
       }
 
+def goalStepBatchItemError
+    (item : Protocol.GoalStepBatchItem)
+    (message : String) : OwnedGoalStepBatchItemResult :=
+  let attemptResults := item.tactics.mapIdx λ tacticIdx tactic =>
+    goalStepBatchAttemptError tacticIdx tactic (.some message)
+  {
+    item := {
+      itemIdx := item.itemIdx,
+      results := attemptResults,
+    },
+  }
+
 def runGoalStepBatchItems
     (scope : Elab.Command.Scope)
     (options : Protocol.Options)
@@ -448,35 +460,31 @@ def runGoalStepBatchItems
     (items : Array Protocol.GoalStepBatchItem)
     (maxParallelItems : Nat) : CoreM (Array OwnedGoalStepBatchItemResult) := do
   let parallel := Nat.max 1 maxParallelItems
-  if parallel == 1 then
-    let mut results := #[]
-    for item in items do
-      results := results.push (← runGoalStepBatchItem scope options outputDir item)
-    return results
-  else
-    let env ← getEnv
-    let ctx ← read
-    let st ← get
-    discard <| unsafe Runtime.markMultiThreaded env
-    discard <| unsafe Runtime.markMultiThreaded ctx
-    discard <| unsafe Runtime.markMultiThreaded st
-    let wrapped ← Core.wrapAsync
-      (fun item => runGoalStepBatchItem scope options outputDir item)
-      (cancelTk? := ctx.cancelTk?)
-    let mut results := #[]
-    let mut start := 0
-    while start < items.size do
-      let stop := Nat.min items.size (start + parallel)
-      let chunk := items.extract start stop
-      let mut tasks := #[]
-      for item in chunk do
-        tasks := tasks.push (← (wrapped item).asTask)
-      for task in tasks do
-        match task.get with
-        | .ok result => results := results.push result
-        | .error err => throwError s!"item task failed: {← err.toMessageData.toString}"
-      start := stop
-    return results
+  let env ← getEnv
+  let ctx ← read
+  let st ← get
+  discard <| unsafe Runtime.markMultiThreaded env
+  discard <| unsafe Runtime.markMultiThreaded ctx
+  discard <| unsafe Runtime.markMultiThreaded st
+  let mut results := #[]
+  let mut start := 0
+  while start < items.size do
+    let stop := Nat.min items.size (start + parallel)
+    let chunk := items.extract start stop
+    let mut tasks := #[]
+    for item in chunk do
+      let wrapped ← Core.wrapAsync
+        (fun item => runGoalStepBatchItem scope options outputDir item)
+        (cancelTk? := ctx.cancelTk?)
+      tasks := tasks.push (item, ← (wrapped item).asTask)
+    for (item, task) in tasks do
+      match task.get with
+      | .ok result => results := results.push result
+      | .error err =>
+        let message := s!"item task failed: {← err.toMessageData.toString}"
+        results := results.push (goalStepBatchItemError item message)
+    start := stop
+  return results
 
 def goal_step_batch (args : Protocol.GoalStepBatch) : EMainM Protocol.GoalStepBatchResult := do
   IO.FS.createDirAll args.outputDir

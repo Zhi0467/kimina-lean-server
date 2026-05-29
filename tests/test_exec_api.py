@@ -32,8 +32,6 @@ def _test_client(
     settings.state_store_dir = tmp_path / "state-store"
     settings.max_pantograph_workers = 1
     settings.exec_backend = exec_backend
-    if exec_backend == "pantograph_task":
-        settings.max_lean_processes_per_env_profile = 1
     return TestClient(create_app(settings))
 
 
@@ -170,6 +168,21 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
         assert store.stats().state_count == 0
 
 
+def test_exec_stats_route_reports_effective_task_profile_cap(tmp_path: Path) -> None:
+    with _test_client(tmp_path, exec_backend="pantograph_task") as client:
+        response = client.get("/exec/stats")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["settings"]["exec_backend"] == "pantograph_task"
+        assert payload["settings"]["max_lean_processes_per_env_profile"] == -1
+        assert (
+            payload["settings"]["effective_max_lean_processes_per_env_profile"]
+            == 1
+        )
+        assert payload["pantograph_pool"]["max_workers_per_env_profile"] == 1
+
+
 @pytest.mark.parametrize("exec_backend", ["pantograph_pool", "pantograph_task"])
 def test_exec_create_step_and_cleanup_real_pantograph_e2e(
     tmp_path: Path,
@@ -195,6 +208,8 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(
         state = create_payload["items"][0]["states"][0]
         assert state["state_token"].startswith("st_")
         assert state["goals"] == ["n : Nat\n⊢ n + 0 = n"]
+        store = cast(StateStore, cast(Any, client.app).state.state_store)
+        assert store.resolve(state["state_token"]).backend_kind == exec_backend
 
         step_response = client.post(
             "/exec/step_batch",

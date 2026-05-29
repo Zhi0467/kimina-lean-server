@@ -4,18 +4,39 @@ This plan is the concrete backend work for `kimina-lean-server`. The backend
 is an execution service only. Search, policy calls, value calls, SLIME rollout
 logic, graph termination, and proof rendering live outside this repo.
 
-Status as of 2026-05-27: the Pantograph implementation is a correctness
-prototype for the HTTP contract, `state_token` persistence, real Mathlib proof
-stepping, and cleanup lifecycle. It is not the scalable serving architecture.
-The scalable target is a fixed small number of warm Lean processes per
-`env_profile`, ideally one, with bounded Lean-side task concurrency inside the
+Status as of 2026-05-29: the Pantograph task backend is implemented as the
+current migration path. The HTTP contract, `state_token` persistence, real
+Mathlib proof stepping, cleanup lifecycle, backend metadata, parent-token
+pinning, and bounded two-level execution path are all present in the repo. The
+scalable target remains a fixed small number of warm Lean processes per
+`env_profile`, ideally one, with bounded Lean-side item concurrency inside each
 process. The minimum capacity target is one `/exec/step_batch` request with 16
 proof-state items and 8 tactics per item, i.e. 128 tactic attempts, without
-spawning 16 Mathlib-loaded OS processes. This target is conditional on proving
-Lean-side task safety: shared environment handling, constant realization, and
-state pickling/compaction must pass the feasibility gates in
-`docs/lean-task-backend-research.md` before `pantograph_task` becomes the
-serving design.
+spawning 16 Mathlib-loaded OS processes.
+
+The current end-to-end stress evidence is a launched `pantograph_task` server
+running a Goedel-mined 16 x 8 batch through
+`/exec/create_states -> /exec/step_batch -> /exec/cleanup` with
+`max_lean_processes_per_env_profile=1`. The run used one worker process for
+`lean4.29.1_mathlib`, produced a real status mix of `40 open`, `13 complete`,
+and `91 error` tactic results, cleaned the scoped state store back to zero, and
+peaked at about 2.6GB process-tree RSS. The result is saved at
+`.cache/pantograph_benchmark/results_task_stress.json`.
+
+Current migration slice: PyPantograph is vendored as a repo-local editable fork
+under `third_party/PyPantograph`, and the root uv configuration points the
+`pantograph` dependency at that fork. The fork has the required source fixes:
+file-backed `goal.load` states retain their `CompactedRegion` owner and free
+deleted regions on the next command, and `goal.step_batch` runs compatible
+file-backed parent states as item tasks inside one Pantograph process. Each item
+tries its candidate tactics sequentially, while different items can run
+concurrently up to `max_parallel_items_per_lean_process`. A failed item task is
+returned as that item's error result only; sibling item results are preserved.
+
+The remaining migration work is hardening and serving validation, not proving
+the basic architecture from scratch: repeated warm saturation runs,
+trainer-shaped multi-request traffic, better per-attempt timing, and a decision
+on whether/when `pantograph_task` becomes the default.
 
 The source-backed research and spike plan for this pivot lives in
 `docs/lean-task-backend-research.md`.
@@ -25,15 +46,15 @@ Migration shape:
 1. Keep `/exec` schemas and `StateStore` stable.
 2. Insert an internal `ExecBackend` interface behind `server/routers/exec.py`.
 3. Preserve the current worker-pool behavior as `pantograph_pool`.
-4. Add `pantograph_task` behind a config flag once a forked Pantograph exposes
-   one Lean-side `goal.step_batch` command.
-5. Change `/exec/step_batch` routing from "one worker lease per item" to "resolve
-   tokens, group compatible items, call one backend batch primitive per group,
-   and have that primitive run items concurrently inside one Lean process while
-   each item's tactics are tried sequentially."
-6. Make `pantograph_task` the default only after the Lean concurrency audit,
-   realization-collision test, concurrent-pickle test, and 16 item x 8 tactic
-   one-process memory test pass.
+4. Keep the forked Pantograph `goal.step_batch` command and PyPantograph wrapper
+   as the primary migration implementation.
+5. Route `/exec/step_batch` by resolving tokens, grouping compatible items,
+   splitting groups into worker-sized chunks, leasing workers for those chunks,
+   and having each leased worker run its chunk concurrently inside one Lean
+   process while each item's tactics are tried sequentially.
+6. Make `pantograph_task` the default only after repeated warm saturation runs,
+   trainer-shaped multi-request traffic, timeout behavior, and cleanup behavior
+   are validated beyond the first 16 item x 8 tactic server benchmark.
 
 ## Core Decisions
 
@@ -52,6 +73,10 @@ Migration shape:
    - Pantograph naturally supports saving/loading state from files, so it is
      the preferred target for the single-process spike if its Lean-side state
      handling can be made task-safe.
+   - The first `goal.step_batch` implementation should accept file-backed
+     `parentPath`s only. Do not support resident `stateId` parents in the first
+     batch primitive; doing so would drag `State.goalStates` and region maps
+     into the concurrent path.
    - If Pantograph fails for Pantograph-specific reasons, fork a Lean REPL /
      LeanInteract-style worker while preserving the public `/exec` API and
      `StateStore` semantics. This is not a fallback for Lean-runtime
@@ -64,6 +89,9 @@ Migration shape:
    - Internally it maps to a backend-owned saved state file plus metadata.
    - Metadata includes `backend_kind` and `state_format` so Pantograph
      `GoalState` files and REPL `ProofSnapshot` files are never mixed.
+   - `StateStore` persists `backend_kind` and `state_format` with
+     backward-compatible defaults before routing tokens across multiple backend
+     kinds.
    - It is not a file path, not pretty proof-state text, and not a Lean
      process-local state id.
 
@@ -86,13 +114,15 @@ Migration shape:
 
 6. The API scheduler unit is a proof-state expansion item, not a tactic.
    - One step item contains `state_token + tactics[]`.
-   - The scalable backend executes a full request against a fixed small number
-     of warm Lean processes, ideally one process for the matching `env_profile`.
-   - Inside that process, the backend fans out proof-state items with bounded
-     Lean tasks. Each item task loops over its own `tactics[]` sequentially and
-     returns one result per tactic in deterministic item/tactic order.
-   - The existing Pantograph prototype leases one process per busy item and
-     applies tactics sequentially. Treat that as v0 correctness behavior only.
+   - The scalable backend keeps the process pool. The pool is still the
+     process-level scheduler, with free/busy leases, exact-header reuse, LRU
+     eviction, and a hard `max_workers` memory bound.
+   - A leased process no longer handles only one proof-state item. It handles one
+     compatible batch chunk, then fans out that chunk with bounded Lean tasks.
+     Each item task loops over its own `tactics[]` sequentially and returns one
+     result per tactic in deterministic item/tactic order.
+   - The compatibility backend leases one process per busy item and applies
+     tactics sequentially. Treat that as v0 correctness behavior only.
    - Never flatten `tactics[]` into separate manager jobs. Doing so would make
      the Kimina-style pool cold-start duplicate compatible workers when the
      first matching worker becomes busy.
@@ -102,19 +132,62 @@ Migration shape:
    - The minimum supported batch is 16 items with 8 tactics each.
    - Backend concurrency must not be capped by "one OS process per item";
      multiple items must be runnable inside one Lean process subject to explicit
-     `max_parallel_items`, `max_items_per_batch`, and `max_tactics_per_item`
-     limits.
+     `max_parallel_items_per_lean_process`, `max_items_per_step_batch`, and
+     `max_tactics_per_step_item` limits.
+   - Batching is constrained by worker compatibility. Items with different
+     `(env_profile, header_hash, backend_kind, state_format)` cannot go into the
+     same Lean command. If a request has many different headers, the scheduler
+     queues compatible chunks and leases at most `max_workers` processes at a
+     time.
+   - To get useful batching during training, callers should prefer canonical
+     environment headers, for example one dataset-wide Mathlib import profile,
+     instead of producing tiny theorem-specific headers that fragment batches.
    - Tactic candidates inside one item are tried sequentially against that
-     item's parent state in both the prototype and the task backend. The
+     item's parent state in both the compatibility and task backends. The
      concurrency target is across items.
+   - The compatibility backend is already bounded by `max_workers`; it does not
+     spawn an unbounded process per request item. The scaling problem is that
+     useful throughput still requires occupying more Mathlib-loaded workers, so
+     process RSS scales with worker count instead of item workspaces.
+   - A one-process-per-profile target creates head-of-line blocking because a
+     Pantograph process still handles one stdin command at a time. If same-env
+     latency is unacceptable, use measured small process caps, smaller chunks,
+     or both.
+   - Batching increases failure blast radius: a non-cooperative tactic can kill
+     the process and lose the whole compatible chunk, not just one item.
+     Cooperative per-attempt cancellation and moderate chunk sizes are design
+     constraints.
 
 8. Saved proof states need storage cleanup.
-   - Warm Lean processes are capped by a small backend limit. In the prototype
-     this is `max_workers`; in the task backend it should be
-     `max_lean_processes_per_env_profile`.
+   - Warm Lean processes are capped by a small backend limit. In the
+     compatibility backend this is `max_workers`; in the task backend it is
+     `max_lean_processes_per_env_profile` layered under `max_workers`.
    - Saved state files can grow with search branching and must be managed by a
      `StateStore`.
    - v0 cleanup is explicit by `item_id`, with TTL/storage GC as a backup.
+   - Process-local Pantograph cleanup and file-backed state cleanup are
+     different. PyPantograph's normal `GoalState.__del__ -> goal.delete` path
+     deletes process-local `stateId`s. It does not prove that memory backing a
+     file-loaded `goal_load` state is released, because upstream `goal_load`
+     currently ignores the `CompactedRegion` returned by `goalStateUnpickle`.
+     The task backend must either fix that ownership in the Pantograph fork or
+     bound it with worker recycling/RSS limits.
+   - The measured fix is to store the file-loaded `CompactedRegion` with its
+     resident `stateId`, move it to a pending-release queue in `goal.delete`,
+     and free queued regions at the start of the next command. Freeing inside
+     `goal.delete` itself was too early in the spike because the command frame
+     can still hold references.
+   - Task-local `goal.step_batch` parent loads need the same lifetime rule:
+     keep parent regions alive through tactic execution, child save, and goal
+     serialization; enqueue them for deferred release after the response has
+     been constructed. Do not free task parent regions inside worker tasks.
+   - Dedupe `goal.delete` ids before enqueueing regions so duplicate ids cannot
+     double-free a region.
+   - When `/exec/step_batch` starts resolving many tokens before chunked
+     execution, add token pinning/in-flight leases or explicitly reject cleanup
+     races. Server-side pinning is preferable; otherwise `/exec/cleanup` or
+     storage-budget GC can delete a state file after `resolve()` but before a
+     delayed chunk loads it.
 
 ## Stable Response Contract
 
@@ -570,8 +643,8 @@ The EnvClient microbatcher batches proof-state expansion items, not tactics:
 await env.step(node_id=node.id, state_token=node.state_token, tactics=tactics)
 ```
 
-Internally the client may wait a few milliseconds or until `max_items_per_batch`
-to form one HTTP request.
+Internally the client may wait a few milliseconds or until
+`max_items_per_step_batch` to form one HTTP request.
 
 ## Training Attempt Lifecycle And Resume
 
@@ -694,12 +767,24 @@ peak_rss ~= number_of_in_flight_items * warm Mathlib process
 The concrete capacity bar is one `/exec/step_batch` request with:
 
 ```text
-max_items_per_batch = 16
-max_tactics_per_item = 8
-max_attempts_per_batch = 128
+max_items_per_step_batch = 16
+max_tactics_per_step_item = 8
+max_attempts_per_step_batch = 128
+max_items_per_worker_batch = 16
 max_lean_processes_per_env_profile = 1, unless a later measurement justifies a
                                       small fixed number such as 2
 ```
+
+Use these cap names consistently:
+
+| Cap | Layer | Meaning |
+| --- | --- | --- |
+| `max_items_per_step_batch` | HTTP/API | Maximum items in one public request. |
+| `max_tactics_per_step_item` | HTTP/API | Maximum tactics per item. |
+| `max_attempts_per_step_batch` | HTTP/API | Maximum `items * tactics` before Lean work starts. |
+| `max_items_per_worker_batch` | Scheduler | Maximum compatible items sent to one leased worker command. |
+| `max_parallel_items_per_lean_process` / `maxParallelItems` | Lean command | Maximum item tasks running concurrently inside one process. Must be `<= max_items_per_worker_batch`. |
+| `max_lean_processes_per_env_profile` | Process pool | Maximum warm processes for one compatible environment. |
 
 Stock single-process options do not already provide this:
 
@@ -765,19 +850,34 @@ request shaped like:
 Lean-side execution plan:
 
 1. Parse the whole batch on the main command loop.
-2. Resolve each parent from either an existing resident state id or a saved
-   state file path decoded from `state_token` metadata.
-3. Spawn bounded Lean tasks with `IO.asTask` / `BaseIO.asTask` for independent
-   proof-state items. Each item task loads/owns one parent state and loops over
-   that item's `tactics[]` sequentially.
+2. Resolve each parent from a saved state file path decoded from `state_token`
+   metadata. Do not support resident `stateId` parents in the first
+   implementation.
+3. Mark the shared batch context with `Runtime.markMultiThreaded`, wrap item
+   execution with `Core.wrapAsync`, and spawn bounded item tasks. Each item task
+   loads/owns one parent state and loops over that item's `tactics[]`
+   sequentially.
 4. Do not mutate shared `State.goalStates` from worker tasks. Each item task
    saves open children to unique output paths and returns
    `{itemIdx, tacticIdx, status, childPath?, goals, messages}`.
 5. Join item tasks on the main command loop, sort results by
    `(itemIdx, tacticIdx)`, and produce the single JSON response.
-6. Immediately erase transient resident states that are not intentionally cached.
-   Keep any resident cache capped by count and bytes. File-backed child states
-   are owned by `StateStore` and later cleaned by `/exec/cleanup`.
+6. Keep task-loaded parent `CompactedRegion`s alive through child save and goal
+   serialization, then enqueue those regions for deferred release at the next
+   command boundary. File-backed child states are owned by `StateStore` and later
+   cleaned by `/exec/cleanup`.
+
+Protocol constraints:
+
+- Add `GoalStepBatch`, `GoalStepBatchItem`, per-attempt result, and response
+  structs in `src/Pantograph/Protocol.lean`.
+- Do not use a result field literally named `error`; top-level `error` is
+  reserved for `InteractionError`, and the Python wrapper treats `"error" in
+  result` as command failure.
+- Extract helper logic from `goal_tactic`, but not its state-id allocation:
+  site resolution, tactic execution, `hasSorry`/`hasUnsafe` filtering, message
+  serialization, and child-goal serialization should work on an explicit
+  `GoalState` and return data, not mutate `State.goalStates`.
 
 This keeps the public protocol simple and avoids stdout multiplexing. It also
 preserves the current `state_token` abstraction because tokens still decode to
@@ -799,30 +899,40 @@ Do not call the task backend done until all of these pass:
 
 1. Equivalence: for small Init and Mathlib examples, `step_batch` returns the
    same statuses, goals, and child-load behavior as sequential `goal_tactic`.
-2. Lean runtime feasibility: shared-environment handling, constant realization,
+2. Candidate independence: tactics in one item are candidates from the same
+   parent, not a script. A tactic that depends on a previous candidate's local
+   context must fail when run as its own candidate from the original parent.
+3. Lean runtime feasibility: shared-environment handling, constant realization,
    and concurrent child-state pickling pass targeted stress tests before the
    16 x 8 capacity run.
-3. Capacity: one warm Lean process handles a 16 item x 8 tactic request without
+4. Capacity: one warm Lean process handles a 16 item x 8 tactic request without
    starting 16 Lean/Pantograph/REPL child processes.
-4. Memory: measure warm Mathlib RSS before the request, peak RSS during the
+5. Memory: measure warm Mathlib RSS before the request, peak RSS during the
    16 x 8 request, and RSS after cleanup. Peak must stay under an absolute
    configured ceiling and must not scale like one 3GB process per item. Residual
    RSS should be interpreted with allocator-retention metrics rather than treated
    as a simple leak signal.
-5. Lifecycle: child `state_token`s returned from the batch can be used in later
+6. Lifecycle: child `state_token`s returned from the batch can be used in later
    requests; `/exec/cleanup` deletes their files and erases resident state cache
    entries.
-6. Failure isolation: bad tactics, cooperative tactic timeouts, and per-attempt
-   errors return structured failures without poisoning the process or corrupting
-   sibling attempts in the same batch. Non-cooperative tactics may still require
-   process kill/restart, and that loses the whole batch.
-7. Backpressure: requests above `max_items_per_batch`,
-   `max_tactics_per_item`, or `max_attempts_per_batch` are rejected before Lean
-   work starts.
-8. Metrics: log request latency, warm/cold marker, per-attempt latency, status
+7. Failure isolation: invalid parent paths, bad tactics, cooperative tactic
+   timeouts, and per-attempt errors return structured failures without poisoning
+   the process or corrupting sibling attempts in the same batch. Non-cooperative
+   tactics may still require process kill/restart, and that loses the whole
+   batch.
+8. Backpressure: requests above `max_items_per_step_batch`,
+   `max_tactics_per_step_item`, or `max_attempts_per_step_batch` are rejected
+   before Lean work starts.
+9. Metrics: log request latency, warm/cold marker, per-attempt latency, status
    mix, process RSS, resident state count/bytes, state-store bytes, queue depth,
    and in-flight task count.
-9. End-to-end: run the real Goedel-mined frontier benchmark through the new
+10. Grouping and ordering: compatible items are submitted to one backend chunk,
+    fragmented headers are queued through `max_workers`, mixed valid/invalid
+    tokens preserve input order, and backend/state-format mismatches are
+    rejected or routed explicitly.
+11. Cleanup safety: active token pinning or an equivalent cleanup race contract
+    is tested; duplicate `goal.delete` ids do not double-free a region.
+12. End-to-end: run the real Goedel-mined frontier benchmark through the new
    backend, resolve bugs found along the way, and compare against the Pantograph
    correctness baseline.
 
@@ -837,16 +947,17 @@ State size grows much faster than printed proof-state text:
 So state-store cleanup, TTL/GC, and per-token size metrics are required from
 the start.
 
-## Pantograph Prototype Implementation Plan
+## Pantograph Backend Status
 
-Implement the prototype in small, testable layers. The goal is not high
-throughput; it is proving that the stable API contract, state ownership, and
-Pantograph normalization are correct before replacing the worker internals with
-the task backend.
+The layers below are implemented for the compatibility backend and extended for
+the task backend. Keep this section as the checklist for hardening and future
+backend changes.
 
 ### Step 1: Minimal HTTP Schemas
 
-Add `server/schemas_exec.py` for only the three public JSON shapes:
+Status: implemented in `server/schemas_exec.py`.
+
+The public JSON shapes are:
 
 - `/exec/create_states`: `env_profile`, `items[{item_id, code, timeout_ms}]`
 - `/exec/step_batch`: `items[{node_id, state_token, tactics, timeout_ms}]`
@@ -864,7 +975,7 @@ Avoid separate public models for Pantograph internals.
 
 ### Step 2: StateStore
 
-Add `server/state_store.py` before Pantograph integration.
+Status: implemented in `server/state_store.py`.
 
 Required behavior:
 
@@ -879,22 +990,32 @@ Required behavior:
 - delete all states for an `item_id`
 - report count/bytes and GC expired records
 
-Add `tests/test_state_store.py` for this layer.
+Implemented hardening:
+
+- `StateRecord` persists `backend_kind` and `state_format` with
+  backward-compatible defaults, and `create_child()` inherits them.
+- Parent tokens are pinned while `/exec/step_batch` is resolving and executing
+  chunks, so cleanup and GC skip active parent state files.
+- `root_dir` is canonicalized to an absolute path so Pantograph subprocesses
+  can load saved state files even when their working directory is the Mathlib
+  project.
 
 ### Step 3: Exec Router Skeleton
 
-Add `server/routers/exec.py` and wire it in `server/main.py`.
+Status: implemented in `server/routers/exec.py` and wired through
+`server/main.py`.
 
-- `/exec/cleanup` should be real and call `StateStore.delete_by_item_id`.
-- `/exec/create_states` and `/exec/step_batch` can initially raise HTTP 501
-  after validating request bodies.
-- Add API tests for validation and cleanup behavior.
-
-This proves FastAPI wiring and storage ownership without Pantograph complexity.
+Current behavior: `/exec/step_batch` selects `pantograph_pool` or
+`pantograph_task` through `server/exec_backends.py`. The task backend resolves
+and pins tokens, groups compatible items, chunks them by
+`max_items_per_worker_batch`, leases one worker per chunk, calls
+`goal.step_batch`, promotes child paths into `StateStore`, and reorders
+responses back to input order.
 
 ### Step 4: Pantograph Normalization Adapter
 
-Add `server/pantograph_worker.py` with tests against the real Pantograph API.
+Status: implemented in `server/pantograph_worker.py` for the compatibility
+backend.
 
 First test cases:
 
@@ -911,7 +1032,7 @@ stable API shape.
 
 ### Step 5: Pantograph Manager And Real Endpoints
 
-Add `server/pantograph_manager.py` and replace HTTP 501 responses:
+Status: implemented for `pantograph_pool`.
 
 - `/exec/create_states` splits code like Kimina, leases a compatible worker,
   calls the Pantograph adapter, saves open states into `StateStore`, and tags
@@ -920,8 +1041,13 @@ Add `server/pantograph_manager.py` and replace HTTP 501 responses:
   applies all tactics for that item inside one worker, saves open child states,
   and preserves input order.
 
-Run targeted tests first, then keep existing `/check` and `/verify` tests
-passing.
+Current gaps before `pantograph_task`:
+
+- `PantographManager` reuse is keyed by `env_profile + header_hash`, which is
+  fine for process compatibility but not a full backend seam.
+- Settings are still Pantograph-specific; add `exec_backend`, chunk limits, and
+  task-backend concurrency knobs while keeping backend-specific managers behind
+  the seam.
 
 ### Step 6: Pantograph Worker Lifecycle Hygiene
 

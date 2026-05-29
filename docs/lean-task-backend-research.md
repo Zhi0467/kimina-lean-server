@@ -20,9 +20,12 @@ before returning to broader updates in `docs/backend-end-plan.md`.
 | StateStore backend metadata and pinning | Done | Tokens carry `backend_kind` and `state_format`; `/exec` pins resolved parents while Lean work is in flight. |
 | `/exec` backend seam | Done | `pantograph_pool` remains the default; `pantograph_task` is opt-in and groups compatible items into worker chunks. |
 | Caps and tests | Done | Config caps reject oversized requests; tests cover grouping, incompatible headers, per-command child output isolation, stale batch-dir GC, pool fallback, invalid tokens, cleanup, route e2e for both backends, and direct 16 x 8 one-process stepping. |
-| Runtime metrics | Pending | Basic tests validate behavior, but production metrics for chunk latency, per-attempt timing, and worker RSS still need to be added before performance claims. |
+| Runtime metrics | Done | `/exec/stats` reports backend settings, effective worker caps, pool occupancy, worker PIDs/RSS, and state-store totals; the Goedel benchmark samples process-tree RSS and `/exec/stats`. |
+| Goedel task-backend stress benchmark | Done | `examples/pantograph_step_benchmark.py --launch-server --exec-backend pantograph_task` exercises the real HTTP path with 16 items x 8 tactics in one worker process and asserts backend mode, worker caps, and cleanup. |
+| Batch failure isolation | Done | Lean task failures are converted to per-item error results; one timeout no longer poisons an entire compatible chunk. |
+| Default backend flip | Pending | `pantograph_pool` remains the default until repeated warm saturation runs and trainer integration needs are validated. |
 
-Current implementation checkpoint, 2026-05-28:
+Current implementation checkpoint, 2026-05-29:
 
 - Lean fork: `third_party/PyPantograph/src/Pantograph/Protocol.lean` defines
   the `goal.step_batch` ABI, and `third_party/PyPantograph/src/Repl.lean`
@@ -35,8 +38,17 @@ Current implementation checkpoint, 2026-05-28:
   active parent tokens so cleanup/GC cannot delete files after resolution but
   before Lean loads them.
 - Settings: `exec_backend` defaults to `pantograph_pool`; `pantograph_task`
-  remains available as an opt-in backend until the heavier Mathlib concurrency
-  gates and production metrics pass.
+  remains available as an opt-in backend until repeated warm saturation runs and
+  trainer integration needs are validated.
+- Benchmarking: `examples/pantograph_step_benchmark.py` can launch a configured
+  benchmark server, force `pantograph_task`, cap one Lean process per
+  `env_profile`, prewarm the pool, sample `/exec/stats`, sample process-tree
+  RSS, and fail if backend mode, worker caps, or scoped cleanup do not hold.
+- Operational fix: `StateStore` canonicalizes `root_dir` to an absolute path so
+  saved state files can be loaded by Pantograph subprocesses whose working
+  directory is the Mathlib project.
+- Lean failure isolation: `goal.step_batch` now turns a failed item task into
+  error results for that item only instead of throwing the whole chunk.
 
 Verified tests:
 
@@ -49,11 +61,56 @@ uv run mypy --config-file=pyproject.toml --cache-dir=.mypy_cache \
   --show-error-codes
 ```
 
-`uv run pytest -q` passed 130 tests with 103 deselected by the repo's default
+`uv run pytest -q` passed 136 tests with 103 deselected by the repo's default
 markers. The run includes the direct `goal_step_batch_async` 16 items x 8
 tactics capacity test in one Pantograph process and the real
 `/exec/create_states -> /exec/step_batch -> /exec/cleanup` route test under both
 `pantograph_pool` and `pantograph_task`.
+
+Real Goedel stress benchmark, 2026-05-29:
+
+```sh
+uv run python examples/pantograph_step_benchmark.py \
+  --launch-server \
+  --server-port 8011 \
+  --exec-backend pantograph_task \
+  --n-proofs 16 \
+  --items-per-request 16 \
+  --tactics-per-item 8 \
+  --max-replay-depth 1 \
+  --concurrency 4 \
+  --timeout-ms 180000 \
+  --max-pantograph-workers 2 \
+  --max-lean-processes-per-env-profile 1 \
+  --max-items-per-worker-batch 16 \
+  --max-parallel-items-per-lean-process 16 \
+  --prewarm-proofs 1 \
+  --max-rows-scanned 1000 \
+  --state-store-dir .cache/pantograph_benchmark/state-task-stress \
+  --output .cache/pantograph_benchmark/results_task_stress.json
+```
+
+Observed result:
+
+| Metric | Value |
+| --- | ---: |
+| Step items | 16 |
+| Tactic attempts | 128 |
+| Status mix | 40 open, 13 complete, 91 error |
+| `max_total_workers` | 1 |
+| `max_workers_by_env_profile["lean4.29.1_mathlib"]` | 1 |
+| Peak process-tree RSS | 2583.7MB |
+| Final process-tree RSS | 1673.4MB |
+| Step batch latency | 22705.9ms |
+| Cleanup | 40 states / 2043904 bytes deleted |
+| Scoped state-store before/after | 0 states / 0 states |
+| Final backend | `pantograph_task` |
+
+This run is the first committed end-to-end evidence for the intended two-level
+shape: a bounded process pool with one warm Mathlib/Pantograph process for the
+profile, and item-level Lean tasks inside that process for a 16 x 8 batch. The
+errors are real Lean tactic outcomes from the mined workload; sibling successes
+survive timeouts and failed distractors.
 
 The legacy `/api/check` test path is green again after restoring the local REPL
 setup: `setup.sh` now builds `repl` by default and forces its `lean-toolchain`
@@ -243,6 +300,9 @@ Current verification for this slice:
   roughly `+112MB` growth;
 - direct `goal_step_batch_async(...)` tests pass, including 16 items x 8
   tactics in one Pantograph process with `maxParallelItems = 16`;
+- real HTTP stress benchmark passes for 16 Goedel proof states x 8 tactics with
+  `pantograph_task`, one worker process for `lean4.29.1_mathlib`, and scoped
+  cleanup back to zero;
 - full repo tests pass with the default marker selection:
   `uv run pytest -q`;
 - pre-commit passes with ruff, pyright, and mypy:
@@ -252,12 +312,10 @@ Current verification for this slice:
   examples, and perf/match tests are outside that hook scope.
 
 The next slice should not re-prove the 16 x 8 one-process shape from scratch.
-That has already been tested in `.cache/pantograph-concurrency-spike` with
-`Core.wrapAsync`, `Runtime.markMultiThreaded`, one task per item, and sequential
-tactics inside each item. That machinery has now been ported into the committed
-Pantograph fork as a real `goal.step_batch` command, with the region-lifetime
-fix integrated instead of deliberately leaking parent-load regions as the spike
-did.
+That has now passed both the scratch `.cache/pantograph-concurrency-spike`
+checks and the real `/exec` stress path. The remaining work is repeated warm
+saturation, trainer-shaped multi-request traffic, and deciding whether
+`pantograph_task` should become the default backend.
 
 ## Migration Plan
 

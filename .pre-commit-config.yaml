@@ -1,4 +1,4 @@
-exclude: '^(client|examples|server/server_old|tsts_old)/'
+exclude: '^(client|examples|server/server_old|tsts_old|third_party/PyPantograph)/'
 
 default_install_hook_types:
   - pre-commit

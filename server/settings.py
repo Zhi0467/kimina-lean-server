@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     max_pantograph_workers: int = max_repls
     max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
+    pantograph_worker_startup_timeout_seconds: int = 600
     exec_backend: Literal["pantograph_pool", "pantograph_task"] = "pantograph_pool"
     max_items_per_step_batch: int = 16
     max_tactics_per_step_item: int = 8
@@ -77,3 +78,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def effective_max_lean_processes_per_env_profile(settings: Settings) -> int:
+    if (
+        settings.exec_backend == "pantograph_task"
+        and settings.max_lean_processes_per_env_profile < 0
+    ):
+        return 1
+    return settings.max_lean_processes_per_env_profile

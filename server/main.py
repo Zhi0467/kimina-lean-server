@@ -17,7 +17,11 @@ from .routers.backward import router as backward_router
 from .routers.check import router as check_router
 from .routers.exec import router as exec_router
 from .routers.health import router as health_router
-from .settings import Environment, Settings
+from .settings import (
+    Environment,
+    Settings,
+    effective_max_lean_processes_per_env_profile,
+)
 from .state_store import StateStore, run_state_gc
 
 
@@ -63,7 +67,12 @@ def create_app(settings: Settings) -> FastAPI:
             project_path=settings.project_dir,
             buffer_limit=settings.pantograph_buffer_limit,
             max_worker_uses=settings.max_pantograph_worker_uses,
-            max_workers_per_env_profile=settings.max_lean_processes_per_env_profile,
+            max_workers_per_env_profile=(
+                effective_max_lean_processes_per_env_profile(settings)
+            ),
+            worker_startup_timeout_seconds=(
+                settings.pantograph_worker_startup_timeout_seconds
+            ),
         )
         app.state.state_gc_task = asyncio.create_task(
             run_state_gc(

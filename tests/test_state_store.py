@@ -56,6 +56,26 @@ def test_put_moves_file_and_records_metadata(tmp_path: Path) -> None:
     assert store.stats().total_bytes == len(b"root-state")
 
 
+def test_state_store_canonicalizes_relative_root_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = _write_state(Path("source.bin"), b"root-state")
+    store = StateStore(Path("store"), token_factory=_token_factory("st_root"))
+
+    token = store.put(
+        source,
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    record = store.resolve(token)
+    assert store.root_dir == tmp_path / "store"
+    assert record.path == tmp_path / "store" / "st_root.bin"
+
+
 def test_token_factory_prefixes_tokens_and_avoids_collisions(tmp_path: Path) -> None:
     store = StateStore(
         tmp_path / "store",

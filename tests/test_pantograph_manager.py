@@ -15,9 +15,14 @@ from server.pantograph_manager import (
 @dataclass
 class FakeWorker:
     closed: bool = False
+    pid: int | None = 123
+    rss_bytes: int | None = 456
 
     async def aclose(self) -> None:
         self.closed = True
+
+    def process_tree_rss_bytes(self) -> int | None:
+        return self.rss_bytes
 
 
 class FakeWorkerFactory:
@@ -52,6 +57,7 @@ async def test_pantograph_manager_reuses_compatible_idle_worker() -> None:
     manager = PantographManager(
         max_workers=1,
         buffer_limit=123,
+        worker_startup_timeout_seconds=1,
         worker_factory=factory,
     )
 
@@ -118,6 +124,38 @@ async def test_pantograph_manager_caps_workers_per_env_profile() -> None:
 
     other = await manager.get_worker(env_profile="env_b", header="", timeout=1)
     assert other.env_profile == "env_b"
+
+    await manager.cleanup()
+
+
+async def test_pantograph_manager_stats_report_caps_and_worker_rss() -> None:
+    manager = PantographManager(
+        max_workers=2,
+        max_workers_per_env_profile=1,
+        worker_factory=FakeWorkerFactory(),
+    )
+
+    lease = await manager.get_worker(env_profile="env", header="import Init", timeout=1)
+    busy_stats = await manager.stats()
+
+    assert busy_stats.max_workers == 2
+    assert busy_stats.max_workers_per_env_profile == 1
+    assert busy_stats.worker_startup_timeout_seconds == 600
+    assert busy_stats.busy_workers == 1
+    assert busy_stats.free_workers == 0
+    assert busy_stats.total_workers == 1
+    assert busy_stats.workers_by_env_profile == {"env": 1}
+    assert busy_stats.workers[0].status == "busy"
+    assert busy_stats.workers[0].pid == 123
+    assert busy_stats.workers[0].rss_bytes == 456
+
+    await manager.release_worker(lease)
+    free_stats = await manager.stats()
+
+    assert free_stats.busy_workers == 0
+    assert free_stats.free_workers == 1
+    assert free_stats.workers[0].status == "free"
+    assert free_stats.workers[0].use_count == 1
 
     await manager.cleanup()
 

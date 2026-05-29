@@ -103,3 +103,48 @@ class CleanupResult(BaseModel):
 
 class CleanupResponse(BaseModel):
     deleted_items: list[CleanupResult]
+
+
+class ExecSettingsStats(BaseModel):
+    exec_backend: str
+    max_pantograph_workers: int
+    max_lean_processes_per_env_profile: int
+    effective_max_lean_processes_per_env_profile: int
+    pantograph_worker_startup_timeout_seconds: int
+    max_items_per_step_batch: int
+    max_tactics_per_step_item: int
+    max_attempts_per_step_batch: int
+    max_items_per_worker_batch: int
+    max_parallel_items_per_lean_process: int
+
+
+class PantographWorkerStats(BaseModel):
+    env_profile: str
+    header_hash: str
+    status: str
+    use_count: int
+    pid: int | None = None
+    rss_bytes: int | None = None
+
+
+class PantographPoolStats(BaseModel):
+    max_workers: int
+    max_workers_per_env_profile: int
+    worker_startup_timeout_seconds: int
+    free_workers: int
+    busy_workers: int
+    starting_workers: int
+    total_workers: int
+    workers_by_env_profile: dict[str, int]
+    workers: list[PantographWorkerStats]
+
+
+class StateStoreStatsResponse(BaseModel):
+    state_count: int
+    total_bytes: int
+
+
+class ExecStatsResponse(BaseModel):
+    settings: ExecSettingsStats
+    pantograph_pool: PantographPoolStats
+    state_store: StateStoreStatsResponse

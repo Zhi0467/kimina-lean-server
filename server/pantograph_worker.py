@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pantograph  # type: ignore[reportMissingTypeStubs]
+import psutil
 
 from .pantograph_normalize import (
     exception_to_messages,
@@ -227,6 +228,29 @@ class PantographWorker:
         if proc is None:
             return False
         return proc.returncode is None
+
+    @property
+    def pid(self) -> int | None:
+        proc = getattr(self._server, "proc", None)
+        if proc is None:
+            return None
+        return cast(int, proc.pid)
+
+    def process_tree_rss_bytes(self) -> int | None:
+        pid = self.pid
+        if pid is None:
+            return None
+        try:
+            process = psutil.Process(pid)
+            total = int(process.memory_info().rss)
+            for child in process.children(recursive=True):
+                try:
+                    total += int(child.memory_info().rss)
+                except psutil.Error:
+                    continue
+            return total
+        except psutil.Error:
+            return None
 
     def close(self) -> None:
         close = getattr(self._server, "_close", None)

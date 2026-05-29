@@ -727,6 +727,11 @@ protected def GoalState.tryTacticM
   withCapturingError do
     state.step site tacticM guardMVarErrors
 
+private def withTacticFileMap (tactic : String) (x : Elab.TermElabM α) :
+    Elab.TermElabM α :=
+  withTheReader Core.Context
+      ({ · with fileName := "<pantograph tactic>", fileMap := tactic.toFileMap }) x
+
 /-- Execute a string tactic on given state. Restores TermElabM -/
 @[export pantograph_goal_state_try_tactic_m]
 protected def GoalState.tryTactic (state: GoalState) (site : Site) (tactic: String):
@@ -734,7 +739,7 @@ protected def GoalState.tryTactic (state: GoalState) (site : Site) (tactic: Stri
   state.restoreElabM
   let .some goal := state.actingGoal? site | throwNoGoals
   if let .some fragment := state.fragments[goal]? then
-    return ← withCapturingError do
+    return ← withTacticFileMap tactic <| withCapturingError do
       let (fragments, state') ← state.step' site do
         fragment.step goal tactic $ state.fragments.erase goal
       return { state' with fragments }
@@ -749,7 +754,7 @@ protected def GoalState.tryTactic (state: GoalState) (site : Site) (tactic: Stri
   if pos != tactic.rawEndPos then
     return .parseError "Cannot parse as one tactic block"
   let tacticM := Elab.Tactic.evalTacticSeq stx
-  withCapturingError do
+  withTacticFileMap tactic <| withCapturingError do
     state.step site tacticM (guardMVarErrors := true)
 
 -- Specialized Tactics
