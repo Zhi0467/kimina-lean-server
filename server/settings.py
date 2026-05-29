@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
     pantograph_worker_startup_timeout_seconds: int = 600
-    exec_backend: Literal["pantograph_pool", "pantograph_task"] = "pantograph_pool"
+    exec_backend: Literal[
+        "pantograph_pool", "pantograph_task", "pantograph_process_pool"
+    ] = "pantograph_pool"
     max_items_per_step_batch: int = 16
     max_tactics_per_step_item: int = 8
     max_attempts_per_step_batch: int = 128
@@ -79,11 +81,21 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+# When the bounded process-pool backend is selected but no explicit per-env
+# cap is configured, fall back to this many worker lanes per (env_profile,
+# header). Mathlib's ~3-4 GB of ``.olean`` data is memory-mapped and shared
+# across processes, so each extra worker costs only ~0.75 GB of private memory;
+# the throughput ceiling is the number of physical cores, not memory. Operators
+# should override ``max_lean_processes_per_env_profile`` to match their host.
+DEFAULT_PROCESS_POOL_LANES = 4
+
 
 def effective_max_lean_processes_per_env_profile(settings: Settings) -> int:
-    if (
-        settings.exec_backend == "pantograph_task"
-        and settings.max_lean_processes_per_env_profile < 0
-    ):
+    if settings.max_lean_processes_per_env_profile >= 0:
+        return settings.max_lean_processes_per_env_profile
+    # Unbounded (< 0) is meaningless for backends that must cap process count.
+    if settings.exec_backend == "pantograph_task":
         return 1
+    if settings.exec_backend == "pantograph_process_pool":
+        return DEFAULT_PROCESS_POOL_LANES
     return settings.max_lean_processes_per_env_profile

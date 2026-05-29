@@ -6,6 +6,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from .exec_backend_utils import (
+    compatibility_key,
+    distribute_items_across_lanes,
+    group_items_by_compatibility,
+)
 from .pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
@@ -37,6 +42,14 @@ class StepBatchBackendConfig:
     max_attempts_per_step_batch: int
     max_items_per_worker_batch: int
     max_parallel_items_per_lean_process: int
+    # Bounded process-pool lane count: the number of Lean worker processes a
+    # single (env_profile, header) group may occupy concurrently. Each lane
+    # holds one leased worker and steps its items strictly sequentially, so the
+    # parallel result is byte-identical to running the items one at a time.
+    # Must match the PantographManager's per-env-profile cap so the lanes can
+    # actually acquire that many concurrent leases. ``<= 0`` means unbounded
+    # (degenerates to one lane per item, i.e. item-at-a-time).
+    max_lean_processes_per_env_profile: int = 1
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,13 @@ async def execute_step_batch_request(
         )
     elif config.exec_backend == "pantograph_task":
         items = await execute_step_batch_task(
+            request,
+            state_store=state_store,
+            pantograph_manager=pantograph_manager,
+            config=config,
+        )
+    elif config.exec_backend == "pantograph_process_pool":
+        items = await execute_step_batch_process_pool(
             request,
             state_store=state_store,
             pantograph_manager=pantograph_manager,
@@ -143,6 +163,148 @@ async def execute_step_batch_pool(
                 state_store.unpin(item.state_token)
 
     return list(await asyncio.gather(*(step_one(item) for item in request.items)))
+
+
+async def execute_step_batch_process_pool(
+    request: StepBatchRequest,
+    *,
+    state_store: StateStore,
+    pantograph_manager: PantographManager,
+    config: StepBatchBackendConfig,
+) -> list[StepBatchResult]:
+    """Bounded multi-process backend: exact-equivalent parallelism.
+
+    Items are grouped by ``(env_profile, header_hash)`` worker compatibility and
+    each group is spread across at most ``max_lean_processes_per_env_profile``
+    *lanes*. A lane leases one Lean worker process and steps its items strictly
+    sequentially through the proven ``step_state_with_tactics`` path, so the
+    parallel result is byte-identical to running the items one at a time (each
+    process owns its own ``Environment`` and realization caches — no shared
+    mutable Lean state, unlike the in-process ``pantograph_task`` path).
+
+    Memory is bounded because Lean memory-maps the ~3-4 GB of Mathlib ``.olean``
+    data, so additional worker processes share those pages and cost only ~0.75
+    GB of private memory each. The lanes run concurrently across processes; a
+    single (env_profile, header) group never occupies more than ``N`` processes.
+    """
+    slots: list[StepBatchResult | None] = [None] * len(request.items)
+    resolved: list[ResolvedStepItem] = []
+    pinned_tokens: list[str] = []
+    for index, item in enumerate(request.items):
+        try:
+            record = state_store.resolve_and_pin(item.state_token)
+        except StateTokenNotFound as exc:
+            slots[index] = _invalid_token_result(item, exc)
+            continue
+        pinned_tokens.append(item.state_token)
+        resolved.append(ResolvedStepItem(index=index, item=item, record=record))
+
+    try:
+        groups = group_items_by_compatibility(
+            resolved,
+            key_of_item=lambda resolved_item: compatibility_key(
+                resolved_item.record.env_profile,
+                resolved_item.record.header_hash,
+            ),
+        )
+        await asyncio.gather(
+            *(
+                _run_process_pool_group(
+                    group.items,
+                    slots=slots,
+                    state_store=state_store,
+                    pantograph_manager=pantograph_manager,
+                    max_lanes=config.max_lean_processes_per_env_profile,
+                )
+                for group in groups
+            )
+        )
+    finally:
+        state_store.unpin_many(pinned_tokens)
+
+    return [
+        result
+        if result is not None
+        else _item_error_result(request.items[index], "step_batch item was not executed")
+        for index, result in enumerate(slots)
+    ]
+
+
+async def _run_process_pool_group(
+    group_items: list[ResolvedStepItem],
+    *,
+    slots: list[StepBatchResult | None],
+    state_store: StateStore,
+    pantograph_manager: PantographManager,
+    max_lanes: int,
+) -> None:
+    lanes = distribute_items_across_lanes(group_items, max_lanes)
+    await asyncio.gather(
+        *(
+            _run_process_pool_lane(
+                lane,
+                slots=slots,
+                state_store=state_store,
+                pantograph_manager=pantograph_manager,
+            )
+            for lane in lanes
+        )
+    )
+
+
+async def _run_process_pool_lane(
+    lane_items: list[ResolvedStepItem],
+    *,
+    slots: list[StepBatchResult | None],
+    state_store: StateStore,
+    pantograph_manager: PantographManager,
+) -> None:
+    """Step one lane's items sequentially, reusing a single worker lease.
+
+    The lane keeps the same worker process warm across its items (no per-item
+    lease churn). If a worker dies mid-lane it is destroyed and the next item
+    lazily re-leases a fresh one, so a single crash never corrupts the lane's
+    remaining items.
+    """
+    lease: PantographWorkerLease | None = None
+    try:
+        for resolved_item in lane_items:
+            if lease is None:
+                try:
+                    lease = await pantograph_manager.get_worker(
+                        env_profile=resolved_item.record.env_profile,
+                        header=resolved_item.record.header,
+                        timeout=resolved_item.item.timeout_ms / 1000,
+                    )
+                except NoAvailablePantographWorkerError as exc:
+                    slots[resolved_item.index] = _item_error_result(
+                        resolved_item.item, str(exc)
+                    )
+                    continue
+            lease.worker.set_timeout_seconds(
+                _timeout_seconds(resolved_item.item.timeout_ms)
+            )
+            try:
+                worker_results = await lease.worker.step_state_with_tactics(
+                    resolved_item.record.path,
+                    resolved_item.item.tactics,
+                    state_dir=state_store.root_dir,
+                )
+                slots[resolved_item.index] = _step_batch_result_from_worker_results(
+                    resolved_item.item,
+                    worker_results,
+                    state_store=state_store,
+                    backend_kind="pantograph_process_pool",
+                )
+            except Exception as exc:
+                slots[resolved_item.index] = _item_error_result(
+                    resolved_item.item, str(exc)
+                )
+            if lease is not None and not lease.worker.is_alive():
+                await return_worker(pantograph_manager, lease)
+                lease = None
+    finally:
+        await return_worker(pantograph_manager, lease)
 
 
 async def execute_step_batch_task(

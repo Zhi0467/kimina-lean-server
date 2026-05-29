@@ -140,6 +140,9 @@ async def step_batch(
         max_parallel_items_per_lean_process=(
             settings.max_parallel_items_per_lean_process
         ),
+        max_lean_processes_per_env_profile=(
+            effective_max_lean_processes_per_env_profile(settings)
+        ),
     )
     try:
         return await execute_step_batch_request(
