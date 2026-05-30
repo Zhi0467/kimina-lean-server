@@ -17,6 +17,11 @@ mathlib4/
 repl/
 .leanfoundry-state/
 
+# Local Lean/Pantograph research checkouts and build artifacts
+third_party/
+.lake/
+**/.lake/
+
 # Environment variables
 .env
 
