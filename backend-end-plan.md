@@ -1007,12 +1007,177 @@ Known gaps:
   to derive microbatch shape, and the plain `step_batch` path does not split.
 - No production stats endpoint for worker/state/load metrics.
 
+## Benchmark And Test Gates By Phase
+
+Do not wait until Phase 6 to start measuring. Each phase adds a small benchmark
+or stress harness that targets the property introduced in that phase. Early
+phase harnesses are mostly correctness and race tests; throughput numbers become
+meaningful only after the API, client, and observability contracts are in place.
+
+Every benchmark or stress script should emit a machine-readable report with:
+
+```text
+git_sha
+phase
+backend config
+workload shape
+worker/process config
+request/microbatch ids when applicable
+status counts
+state-store before/after
+worker stats before/after
+wall times and latency percentiles for the operations it exercises
+success/failure verdict
+```
+
+### Phase 2A Benchmark Gate: Cleanup Race Correctness
+
+Add:
+
+- A deterministic fake-worker race harness where a step resolves and pins a
+  parent, pauses before child registration, and cleanup is called while the item
+  is live.
+- A StateStore cleanup harness for pinned states: one pinned token plus one
+  unpinned sibling under the same `item_id`.
+- A small real Lean smoke run: create one state, step it with a few tactics,
+  cleanup, and verify StateStore returns to zero.
+
+Expected success signal:
+
+- Cleanup during live work returns `status="deferred"`, deletes zero states, and
+  leaves all states intact.
+- Cleanup after the step drains returns `status="deleted"` and leaves
+  `count_by_item_id(item_id) == 0`.
+- A pinned state makes public cleanup defer without deleting the unpinned sibling.
+- No child state can be registered after cleanup reports `deleted`.
+- Lifecycle counts return to zero after every successful or failing step.
+
+This is not a throughput benchmark. It proves cleanup is truthful.
+
+### Phase 2B Benchmark Gate: Cancel And Drain
+
+Add:
+
+- A deterministic fake-worker cancel harness with a multi-item lane sharing one
+  `item_id`; cancel after the first item starts.
+- A cancel polling scenario: cancel active item, wait until drained, then cleanup.
+- Metrics in the harness for `cancel_to_drained_ms`, skipped item count, and
+  cleanup outcome.
+
+Expected success signal:
+
+- The currently running Pantograph command is allowed to finish or time out.
+- Later lane items for that `item_id` return `cancelled` and do not lease workers
+  or create states.
+- Repeated cancel is idempotent and reports the current `in_flight` count.
+- Cleanup is deferred while work is live and deletes everything after drain.
+
+This proves search can abandon an attempt without starting more work for it.
+
+### Phase 3 Benchmark Gate: Caps And Backpressure
+
+Add:
+
+- A cap-boundary harness with tiny configured caps for create items, step items,
+  tactics per item, and total tactic attempts.
+- A worker-acquire stress harness with `max_pantograph_workers=1`, short
+  `acquire_timeout_ms`, and more concurrent requests than the pool can serve.
+- A queue-limit stress harness once route-level queue caps exist.
+
+Expected success signal:
+
+- Oversized requests fail with 422 before worker leasing and before StateStore
+  writes.
+- Worker acquisition contention returns `overloaded` per item or 429/503 for the
+  whole request; it never appears as tactic `error`.
+- Rejected/overloaded work creates no child state and is safe to retry.
+- Reported manager wait time and overload counts explain the observed failures.
+
+This proves load pressure is explicit backpressure, not corrupted proof signal.
+
+### Phase 4 Benchmark Gate: LeanFoundry EnvClient Reliability
+
+Add:
+
+- A fake-server EnvClient harness that injects `overloaded`, 429/503, dropped
+  responses, read timeouts, and malformed/missing node results.
+- A persisted microbatch resume harness for a 1024-item logical call split into
+  64 microbatches of 16, with a simulated crash at microbatch 63.
+- A same-`item_id` scheduling harness that queues multiple nodes from one search
+  attempt and verifies they are not sent in overlapping HTTP requests.
+- A small real-server client smoke run using `/exec/limits`, create, step,
+  cleanup, and retry of an observed `overloaded` fake or controlled response.
+
+Expected success signal:
+
+- Observed `overloaded` results are retried unchanged.
+- Unknown transport outcomes are marked uncertain; create/step is not blindly
+  replayed under the same attempt.
+- Resume restarts at the first incomplete/unknown microbatch, not at item 0.
+- The client serializes live requests for the same `item_id` while allowing
+  different attempts to run concurrently.
+- The client derives batch size and in-flight limits from `/exec/limits`.
+
+This is the first point where the Python EnvClient is LeanFoundry-reliable.
+
+### Phase 5 Benchmark Gate: Observability Completeness
+
+Add:
+
+- A stats/metrics validation run that performs create, step, cleanup, cancel,
+  overload, and GC paths.
+- Benchmark report checks that required fields are present: header group sizes,
+  lane distribution, manager wait, cold/warm worker counts, worker PID/RSS,
+  lifecycle counts, status mix, and StateStore bytes.
+
+Expected success signal:
+
+- A benchmark report can explain wall time from cold starts, header grouping,
+  lane distribution, manager wait, and worker utilization.
+- No run is accepted without enough metrics to distinguish "slow because cold
+  start" from "slow because saturated" from "slow because header fragmented."
+
+This makes Phase 6 numbers interpretable.
+
+### Phase 6 Benchmark Gate: Whole-System E2E And Soak
+
+Add:
+
+- Real Goedel-derived workloads through current `main` only:
+
+```text
+16 items x 8 tactics
+200 items x 8 tactics
+1024 items split into 64 microbatches of 16
+```
+
+- Cold and warm runs.
+- An interrupted 1024-item run that resumes near the end.
+- A soak run long enough to exercise worker reuse, TTL/GC backstops, and repeated
+  cleanup.
+
+Expected success signal:
+
+- No server crashes, worker leaks, or state-store leaks.
+- StateStore count/bytes return to baseline after cleanup for every completed or
+  abandoned attempt.
+- Peak worker count never exceeds configured caps.
+- Memory is bounded by worker count, not item count.
+- Throughput and latency are reported with cold-start, header-fragmentation, lane
+  distribution, and manager-wait context.
+- Resume avoids replaying completed microbatches.
+- Status mix is explainable: proof `error` means tactic failure, while load
+  pressure appears as `overloaded` or request-level backpressure.
+
+This is the point where we can claim the backend works as a system.
+
 ## Production Roadmap
 
 The next implementation slice is Phase 2A only: item lifecycle registry +
-deferred cleanup. Do not start client resume, limits, cancel, or benchmark work
-until Phase 2A is green. It is small, falsifiable, and fixes the correctness race
-that can otherwise corrupt cleanup semantics.
+deferred cleanup. Do not start client resume, limits, cancel, or broad throughput
+benchmark work until Phase 2A is green. The only benchmark work in Phase 2A is
+the cleanup race gate above. It is small, falsifiable, and fixes the correctness
+race that can otherwise corrupt cleanup semantics.
 
 Phase 2A is done only when:
 
