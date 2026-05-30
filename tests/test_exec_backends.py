@@ -9,7 +9,8 @@ from server.exec_backends import StepBatchBackendConfig, execute_step_batch_requ
 from server.exec_lifecycle import ItemLifecycleRegistry
 from server.pantograph_manager import PantographManager, header_hash
 from server.pantograph_worker import PantographStepResult
-from server.schemas_exec import StepBatchItem, StepBatchRequest
+from server.routers.exec import cleanup as cleanup_endpoint
+from server.schemas_exec import CleanupRequest, StepBatchItem, StepBatchRequest
 from server.state_store import StateStore
 
 
@@ -51,10 +52,17 @@ class _FakeWorker:
 
 
 class _BlockingWorker(_FakeWorker):
-    def __init__(self, *, started: asyncio.Event, release: asyncio.Event) -> None:
+    def __init__(
+        self,
+        *,
+        started: asyncio.Event,
+        release: asyncio.Event,
+        result_status: str = "complete",
+    ) -> None:
         super().__init__()
         self.started = started
         self.release = release
+        self.result_status = result_status
 
     async def step_state_with_tactics(
         self,
@@ -66,6 +74,16 @@ class _BlockingWorker(_FakeWorker):
         self.step_calls.append((state_path, list(tactics)))
         self.started.set()
         await self.release.wait()
+        if self.result_status == "open":
+            return [
+                PantographStepResult(
+                    tactic=tactic,
+                    status="open",
+                    state_path=_write_state(state_dir / f"child_{index}.bin", b"child"),
+                    goals=["⊢ child"],
+                )
+                for index, tactic in enumerate(tactics)
+            ]
         return [
             PantographStepResult(tactic=tactic, status="complete")
             for tactic in tactics
@@ -341,6 +359,83 @@ async def test_cancel_skips_later_items_in_same_lane(tmp_path: Path) -> None:
     assert response.items[0].results[0].status == "complete"
     assert response.items[1].results[0].status == "cancelled"
     assert lifecycle.snapshot("item_0").status == "drained"
+    await manager.cleanup()
+
+
+async def test_cleanup_defers_while_step_batch_is_creating_child(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin", b"parent"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    worker = _BlockingWorker(
+        started=started,
+        release=release,
+        result_status="open",
+    )
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(
+        max_workers=1,
+        worker_factory=_BlockingWorkerFactory(worker),
+    )
+
+    task = asyncio.create_task(
+        execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id="item_0:n0",
+                        state_token=token,
+                        tactics=["rw [Nat.add_comm]"],
+                        timeout_ms=1000,
+                    )
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    )
+    await started.wait()
+
+    deferred = await cleanup_endpoint(
+        CleanupRequest(item_ids=["item_0"]),
+        state_store=store,
+        lifecycle=lifecycle,
+        _api_key=None,
+    )
+
+    assert deferred.deleted_items[0].status == "deferred"
+    assert deferred.deleted_items[0].reason == "in_flight"
+    assert deferred.deleted_items[0].deleted_states == 0
+    assert store.count_by_item_id("item_0") == 1
+
+    release.set()
+    response = await task
+    child_token = response.items[0].results[0].state_token
+    assert response.items[0].results[0].status == "open"
+    assert child_token is not None
+    assert store.count_by_item_id("item_0") == 2
+
+    deleted = await cleanup_endpoint(
+        CleanupRequest(item_ids=["item_0"]),
+        state_store=store,
+        lifecycle=lifecycle,
+        _api_key=None,
+    )
+
+    assert deleted.deleted_items[0].status == "deleted"
+    assert deleted.deleted_items[0].deleted_states == 2
+    assert store.count_by_item_id("item_0") == 0
     await manager.cleanup()
 
 

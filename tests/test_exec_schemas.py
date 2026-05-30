@@ -12,6 +12,7 @@ from server.schemas_exec import (
     CleanupRequest,
     CleanupResponse,
     CleanupResult,
+    CreateStatesItem,
     CreateStatesRequest,
     CreateStatesResponse,
     CreateStatesResult,
@@ -70,6 +71,17 @@ def test_timeout_ms_alias_populates_split_timeouts() -> None:
     assert item.acquire_timeout_ms == 1234
     assert item.step_timeout_ms == 1234
     assert "timeout_ms" not in item.model_dump()
+
+    create_item = CreateStatesItem(
+        item_id="theorem_42:a0",
+        code="theorem t : True := by\n  sorry",
+        timeout_ms=2345,
+        acquire_timeout_ms=3456,
+    )
+
+    assert create_item.acquire_timeout_ms == 3456
+    assert create_item.step_timeout_ms == 2345
+    assert "timeout_ms" not in create_item.model_dump()
 
 
 def test_cleanup_request_validates_item_ids() -> None:

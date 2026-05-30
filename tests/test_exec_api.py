@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, AsyncIterator, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
 from server.exec_backends import return_worker as _return_worker
+from server.exec_request_limiter import ExecRequestRejected
 from server.main import create_app
 from server.routers.exec import cleanup as cleanup_endpoint
 from server.exec_lifecycle import ItemLifecycleRegistry
@@ -66,6 +68,13 @@ class _FakeWorker:
 @dataclass
 class _FakeLease:
     worker: _FakeWorker
+
+
+class _RejectingLimiter:
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        raise ExecRequestRejected("exec request queue is full")
+        yield
 
 
 @pytest.mark.asyncio
@@ -204,6 +213,43 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
         assert store.stats().state_count == 0
 
 
+def test_exec_cleanup_route_defers_when_state_is_pinned(tmp_path: Path) -> None:
+    with _test_client(tmp_path) as client:
+        app = cast(Any, client.app)
+        store = cast(StateStore, app.state.state_store)
+        token = store.put(
+            _write_state(tmp_path / "root.bin", b"root"),
+            item_id="theorem_42:a0",
+            env_profile="env",
+            header="import Init",
+            header_hash="header",
+        )
+        store.resolve_and_pin(token)
+        try:
+            response = client.post(
+                "/exec/cleanup",
+                json={"item_ids": ["theorem_42:a0"]},
+            )
+        finally:
+            store.unpin(token)
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "deleted_items": [
+                {
+                    "item_id": "theorem_42:a0",
+                    "status": "deferred",
+                    "reason": "pinned",
+                    "in_flight": 0,
+                    "pinned_states": 1,
+                    "deleted_states": 0,
+                    "deleted_bytes": 0,
+                }
+            ]
+        }
+        assert store.count_by_item_id("theorem_42:a0") == 1
+
+
 def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
     with _test_client(tmp_path) as client:
         cancel_response = client.post(
@@ -220,6 +266,44 @@ def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
         payload = limits_response.json()
         assert payload["recommended_items_per_step_batch"] == 16
         assert payload["same_item_id_pipelining"] is False
+
+
+def test_exec_routes_return_503_when_request_limiter_rejects(
+    tmp_path: Path,
+) -> None:
+    with _test_client(tmp_path) as client:
+        app = cast(Any, client.app)
+        app.state.exec_request_limiter = _RejectingLimiter()
+
+        create_response = client.post(
+            "/exec/create_states",
+            json={
+                "env_profile": "lean_init_test",
+                "items": [
+                    {
+                        "item_id": "theorem_42:a0",
+                        "code": "theorem t : True := by\n  sorry",
+                    }
+                ],
+            },
+        )
+        assert create_response.status_code == 503
+        assert "exec request queue is full" in create_response.text
+
+        step_response = client.post(
+            "/exec/step_batch",
+            json={
+                "items": [
+                    {
+                        "node_id": "theorem_42:a0:n0",
+                        "state_token": "st_missing",
+                        "tactics": ["simp"],
+                    }
+                ]
+            },
+        )
+        assert step_response.status_code == 503
+        assert "exec request queue is full" in step_response.text
 
 
 def test_exec_routes_reject_oversized_create_before_worker_leasing(
