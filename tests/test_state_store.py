@@ -135,6 +135,32 @@ def test_delete_by_item_id_deletes_only_owned_files(tmp_path: Path) -> None:
     assert store.resolve(b1).path.exists()
 
 
+def test_pinned_state_is_not_deleted_until_unpinned(tmp_path: Path) -> None:
+    store = StateStore(
+        tmp_path / "store",
+        token_factory=_token_factory("st_root"),
+    )
+    token = store.put(
+        _write_state(tmp_path / "root.bin", b"root"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+    record = store.resolve_and_pin(token)
+
+    pinned_delete = store.delete_by_item_id("theorem_42:a0")
+
+    assert pinned_delete.deleted_states == 0
+    assert record.path.exists()
+    assert store.stats().state_count == 1
+
+    store.unpin(token)
+    deleted = store.delete_by_item_id("theorem_42:a0")
+
+    assert deleted.deleted_states == 1
+    assert not record.path.exists()
+
+
 def test_gc_expired_deletes_stale_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = StateStore(tmp_path / "store", ttl_seconds=10, token_factory=_token_factory("st_old"))

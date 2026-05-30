@@ -68,7 +68,7 @@ async def test_pantograph_manager_reuses_compatible_idle_worker() -> None:
     )
 
     assert second is first
-    assert factory.calls == [(["Init"], None, 1, 123)]
+    assert factory.calls == [(["Init"], None, 600, 123)]
     assert second.header_hash == header_hash("import Init")
 
     await manager.release_worker(second)
@@ -101,6 +101,23 @@ async def test_pantograph_manager_times_out_when_all_workers_are_busy() -> None:
 
     with pytest.raises(NoAvailablePantographWorkerError, match="Timed out"):
         await manager.get_worker(env_profile="env", header="", timeout=0.001)
+
+    await manager.cleanup()
+
+
+async def test_pantograph_manager_enforces_per_env_profile_cap() -> None:
+    manager = PantographManager(
+        max_workers=2,
+        max_workers_per_env_profile=1,
+        worker_factory=FakeWorkerFactory(),
+    )
+    await manager.get_worker(env_profile="env", header="", timeout=1)
+
+    with pytest.raises(NoAvailablePantographWorkerError, match="Timed out"):
+        await manager.get_worker(env_profile="env", header="", timeout=0.001)
+
+    other = await manager.get_worker(env_profile="other", header="", timeout=1)
+    assert other.env_profile == "other"
 
     await manager.cleanup()
 

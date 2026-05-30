@@ -69,12 +69,13 @@ class StateStore:
             raise ValueError("ttl_seconds must be positive")
         if max_bytes < -1:
             raise ValueError("max_bytes must be -1 or non-negative")
-        self.root_dir = root_dir
+        self.root_dir = root_dir.expanduser().resolve()
         self.ttl = timedelta(seconds=ttl_seconds)
         self.max_bytes = max_bytes
         self._token_factory = token_factory or self._default_token
         self._records: dict[str, StateRecord] = {}
         self._tokens_by_item_id: dict[str, set[str]] = {}
+        self._pinned_tokens: dict[str, int] = {}
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._rehydrate()
 
@@ -137,6 +138,24 @@ class StateStore:
         self._write_metadata(updated)
         return updated
 
+    def resolve_and_pin(self, state_token: str) -> StateRecord:
+        record = self.resolve(state_token)
+        self._pinned_tokens[state_token] = self._pinned_tokens.get(state_token, 0) + 1
+        return record
+
+    def unpin(self, state_token: str) -> None:
+        count = self._pinned_tokens.get(state_token)
+        if count is None:
+            return
+        if count <= 1:
+            self._pinned_tokens.pop(state_token, None)
+        else:
+            self._pinned_tokens[state_token] = count - 1
+
+    def unpin_many(self, state_tokens: list[str]) -> None:
+        for state_token in state_tokens:
+            self.unpin(state_token)
+
     def create_child(self, parent_token: str, child_path: Path) -> str:
         parent = self.resolve(parent_token)
         return self.put(
@@ -190,6 +209,8 @@ class StateStore:
         deleted_states = 0
         deleted_bytes = 0
         for token in tokens:
+            if token in self._pinned_tokens:
+                continue
             record = self._records.pop(token, None)
             if record is None:
                 continue

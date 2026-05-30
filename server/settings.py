@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     max_pantograph_workers: int = max_repls
     max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
+    pantograph_worker_startup_timeout_seconds: int = 600
+    max_lean_processes_per_env_profile: int = 4
+    max_items_per_step_batch: int = 1024
+    max_tactics_per_step_item: int = 64
+    max_attempts_per_step_batch: int = 8192
 
     init_repls: dict[str, int] = {}
 

@@ -45,6 +45,7 @@ def create_app(settings: Settings) -> FastAPI:
             except Exception as e:
                 logger.exception("Failed to connect to database: %s", e)
 
+        app.state.settings = settings
         manager = Manager(
             max_repls=settings.max_repls,
             max_repl_uses=settings.max_repl_uses,
@@ -62,6 +63,10 @@ def create_app(settings: Settings) -> FastAPI:
             project_path=settings.project_dir,
             buffer_limit=settings.pantograph_buffer_limit,
             max_worker_uses=settings.max_pantograph_worker_uses,
+            max_workers_per_env_profile=settings.max_lean_processes_per_env_profile,
+            worker_startup_timeout_seconds=(
+                settings.pantograph_worker_startup_timeout_seconds
+            ),
         )
         app.state.state_gc_task = asyncio.create_task(
             run_state_gc(

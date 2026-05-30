@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 from typing import cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..auth import require_key
+from ..exec_backends import (
+    StepBatchBackendConfig,
+    StepBatchCapError,
+    execute_step_batch_request,
+    return_worker as _return_worker,
+)
 from ..pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
-    PantographWorkerLease,
     header_hash,
 )
 from ..schemas_exec import (
@@ -21,14 +26,12 @@ from ..schemas_exec import (
     CreateStatesResponse,
     CreateStatesResult,
     StateInfo,
-    StepBatchItem,
     StepBatchRequest,
     StepBatchResponse,
-    StepBatchResult,
-    StepResult,
 )
 from ..split import split_snippet
-from ..state_store import StateStore, StateTokenNotFound
+from ..settings import Settings
+from ..state_store import StateStore
 
 router = APIRouter(prefix="/exec")
 
@@ -39,6 +42,10 @@ def get_state_store(request: Request) -> StateStore:
 
 def get_pantograph_manager(request: Request) -> PantographManager:
     return cast(PantographManager, request.app.state.pantograph_manager)
+
+
+def get_settings(request: Request) -> Settings:
+    return cast(Settings, request.app.state.settings)
 
 
 @router.post(
@@ -114,108 +121,30 @@ async def step_batch(
     request: StepBatchRequest,
     state_store: StateStore = Depends(get_state_store),
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> StepBatchResponse:
-    async def step_one(item: StepBatchItem) -> StepBatchResult:
-        try:
-            record = state_store.resolve(item.state_token)
-        except StateTokenNotFound as exc:
-            return StepBatchResult(
-                node_id=item.node_id,
-                results=[
-                    StepResult(
-                        tactic=tactic,
-                        status="invalid_state_token",
-                        messages=[str(exc)],
-                    )
-                    for tactic in item.tactics
-                ],
-            )
-
-        lease = None
-        try:
-            lease = await pantograph_manager.get_worker(
-                env_profile=record.env_profile,
-                header=record.header,
-                timeout=item.timeout_ms / 1000,
-            )
-            lease.worker.set_timeout_seconds(_timeout_seconds(item.timeout_ms))
-            worker_results = await lease.worker.step_state_with_tactics(
-                record.path,
-                item.tactics,
-                state_dir=state_store.root_dir,
-            )
-            results: list[StepResult] = []
-            for result in worker_results:
-                state_token = None
-                if result.status == "open" and result.state_path is not None:
-                    state_token = state_store.create_child(
-                        item.state_token,
-                        result.state_path,
-                    )
-                results.append(
-                    StepResult(
-                        tactic=result.tactic,
-                        status=result.status,
-                        state_token=state_token,
-                        goals=result.goals,
-                        messages=result.messages,
-                    )
-                )
-            return StepBatchResult(node_id=item.node_id, results=results)
-        except NoAvailablePantographWorkerError as exc:
-            return StepBatchResult(
-                node_id=item.node_id,
-                results=[
-                    StepResult(tactic=tactic, status="error", messages=[str(exc)])
-                    for tactic in item.tactics
-                ],
-            )
-        except Exception as exc:
-            return StepBatchResult(
-                node_id=item.node_id,
-                results=[
-                    StepResult(tactic=tactic, status="error", messages=[str(exc)])
-                    for tactic in item.tactics
-                ],
-            )
-        finally:
-            await _return_worker(pantograph_manager, lease)
-
-    results = await asyncio.gather(*(step_one(item) for item in request.items))
-    return StepBatchResponse(items=list(results))
+    config = StepBatchBackendConfig(
+        max_items_per_step_batch=settings.max_items_per_step_batch,
+        max_tactics_per_step_item=settings.max_tactics_per_step_item,
+        max_attempts_per_step_batch=settings.max_attempts_per_step_batch,
+        max_lean_processes_per_env_profile=(
+            settings.max_lean_processes_per_env_profile
+        ),
+    )
+    try:
+        return await execute_step_batch_request(
+            request,
+            state_store=state_store,
+            pantograph_manager=pantograph_manager,
+            config=config,
+        )
+    except StepBatchCapError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _timeout_seconds(timeout_ms: int) -> int:
     return max((timeout_ms + 999) // 1000, 1)
-
-
-async def _return_worker(
-    pantograph_manager: PantographManager,
-    lease: PantographWorkerLease | None,
-) -> None:
-    """Release a healthy worker back to the pool, or destroy a dead one.
-
-    A Pantograph command timeout or crash leaves the worker's subprocess dead
-    (``proc is None``); recycling it would poison every later request routed to
-    the same env/header. Such workers are destroyed so the pool starts fresh.
-    Reclaiming server-side state via ``agc`` can itself time out and kill the
-    worker, so a failed sweep also destroys the lease.
-    """
-    if lease is None:
-        return
-    if not lease.worker.is_alive():
-        await pantograph_manager.destroy_worker(lease)
-        return
-    try:
-        await lease.worker.agc()
-    except Exception:
-        await pantograph_manager.destroy_worker(lease)
-        return
-    if lease.worker.is_alive():
-        await pantograph_manager.release_worker(lease)
-    else:
-        await pantograph_manager.destroy_worker(lease)
 
 
 @router.post(
@@ -228,7 +157,7 @@ async def cleanup(
     state_store: StateStore = Depends(get_state_store),
     _api_key: str | None = Depends(require_key),
 ) -> CleanupResponse:
-    deleted_items = []
+    deleted_items: list[CleanupResult] = []
     for item_id in request.item_ids:
         stats = state_store.delete_by_item_id(item_id)
         deleted_items.append(

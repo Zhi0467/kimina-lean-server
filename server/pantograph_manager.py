@@ -35,6 +35,29 @@ class PantographWorkerLease:
     use_count: int = 0
 
 
+@dataclass(frozen=True)
+class PantographWorkerStats:
+    env_profile: str
+    header_hash: str
+    status: str
+    use_count: int
+    pid: int | None
+    rss_bytes: int | None
+
+
+@dataclass(frozen=True)
+class PantographManagerStats:
+    max_workers: int
+    max_workers_per_env_profile: int
+    worker_startup_timeout_seconds: int
+    free_workers: int
+    busy_workers: int
+    starting_workers: int
+    total_workers: int
+    workers_by_env_profile: dict[str, int]
+    workers: list[PantographWorkerStats]
+
+
 class PantographManager:
     def __init__(
         self,
@@ -43,16 +66,24 @@ class PantographManager:
         project_path: Path | None = None,
         buffer_limit: int | None = 1_000_000,
         max_worker_uses: int = -1,
+        max_workers_per_env_profile: int = -1,
+        worker_startup_timeout_seconds: int = 600,
         worker_factory: WorkerFactory | None = None,
     ) -> None:
         if max_workers <= 0:
             raise ValueError("max_workers must be positive")
         if max_worker_uses < -1:
             raise ValueError("max_worker_uses must be -1 or non-negative")
+        if max_workers_per_env_profile == 0 or max_workers_per_env_profile < -1:
+            raise ValueError("max_workers_per_env_profile must be -1 or positive")
+        if worker_startup_timeout_seconds <= 0:
+            raise ValueError("worker_startup_timeout_seconds must be positive")
         self.max_workers = max_workers
         self.project_path = project_path
         self.buffer_limit = buffer_limit
         self.max_worker_uses = max_worker_uses
+        self.max_workers_per_env_profile = max_workers_per_env_profile
+        self.worker_startup_timeout_seconds = worker_startup_timeout_seconds
         self._worker_factory = worker_factory or _create_pantograph_worker
 
         self._lock: asyncio.Lock | None = None
@@ -60,6 +91,7 @@ class PantographManager:
         self._free: list[PantographWorkerLease] = []
         self._busy: set[PantographWorkerLease] = set()
         self._starting = 0
+        self._starting_by_env_profile: dict[str, int] = {}
 
     async def get_worker(
         self,
@@ -86,17 +118,18 @@ class PantographManager:
                         return lease
 
                 total = len(self._free) + len(self._busy) + self._starting
-                if total < self.max_workers:
-                    self._starting += 1
+                can_start_for_profile = self._can_start_for_env_profile(env_profile)
+                if total < self.max_workers and can_start_for_profile:
+                    self._mark_starting(env_profile)
                     break
 
-                if self._free:
-                    worker_to_close = min(
-                        self._free,
-                        key=lambda worker: worker.last_used_at,
-                    )
+                worker_to_close = self._worker_to_close_for_start(
+                    env_profile,
+                    can_start_for_profile=can_start_for_profile,
+                )
+                if worker_to_close is not None:
                     self._free.remove(worker_to_close)
-                    self._starting += 1
+                    self._mark_starting(env_profile)
                     break
 
                 remaining = deadline - time()
@@ -118,7 +151,7 @@ class PantographManager:
             worker = await self._worker_factory(
                 imports_from_header(header),
                 self._project_path_for_worker(),
-                max(math.ceil(timeout), 1),
+                max(math.ceil(timeout), self.worker_startup_timeout_seconds, 1),
                 self.buffer_limit,
             )
             lease = PantographWorkerLease(
@@ -130,12 +163,12 @@ class PantographManager:
             )
         except Exception:
             async with self._cond:
-                self._starting -= 1
+                self._unmark_starting(env_profile)
                 self._cond.notify(1)
             raise
 
         async with self._cond:
-            self._starting -= 1
+            self._unmark_starting(env_profile)
             self._busy.add(lease)
             self._cond.notify(1)
         return lease
@@ -166,6 +199,48 @@ class PantographManager:
             return False
         return lease.use_count >= self.max_worker_uses
 
+    def _can_start_for_env_profile(self, env_profile: str) -> bool:
+        if self.max_workers_per_env_profile < 0:
+            return True
+        active = sum(
+            1
+            for lease in [*self._free, *self._busy]
+            if lease.env_profile == env_profile
+        )
+        active += self._starting_by_env_profile.get(env_profile, 0)
+        return active < self.max_workers_per_env_profile
+
+    def _worker_to_close_for_start(
+        self,
+        env_profile: str,
+        *,
+        can_start_for_profile: bool,
+    ) -> PantographWorkerLease | None:
+        if not self._free:
+            return None
+        if can_start_for_profile:
+            return min(self._free, key=lambda worker: worker.last_used_at)
+        same_profile = [
+            lease for lease in self._free if lease.env_profile == env_profile
+        ]
+        if not same_profile:
+            return None
+        return min(same_profile, key=lambda worker: worker.last_used_at)
+
+    def _mark_starting(self, env_profile: str) -> None:
+        self._starting += 1
+        self._starting_by_env_profile[env_profile] = (
+            self._starting_by_env_profile.get(env_profile, 0) + 1
+        )
+
+    def _unmark_starting(self, env_profile: str) -> None:
+        self._starting -= 1
+        count = self._starting_by_env_profile.get(env_profile, 0)
+        if count <= 1:
+            self._starting_by_env_profile.pop(env_profile, None)
+        else:
+            self._starting_by_env_profile[env_profile] = count - 1
+
     async def destroy_worker(self, lease: PantographWorkerLease) -> None:
         self._ensure_lock()
         assert self._cond is not None
@@ -188,6 +263,55 @@ class PantographManager:
             self._busy.clear()
             self._cond.notify_all()
         await asyncio.gather(*(_close_worker(worker) for worker in workers))
+
+    async def stats(self) -> PantographManagerStats:
+        self._ensure_lock()
+        assert self._cond is not None
+        async with self._cond:
+            free = list(self._free)
+            busy = list(self._busy)
+            starting_by_env = dict(self._starting_by_env_profile)
+            worker_stats = [
+                self._lease_stats(lease, status="free") for lease in free
+            ] + [self._lease_stats(lease, status="busy") for lease in busy]
+
+        by_env: dict[str, int] = {}
+        for lease in [*free, *busy]:
+            by_env[lease.env_profile] = by_env.get(lease.env_profile, 0) + 1
+        for env_profile, count in starting_by_env.items():
+            by_env[env_profile] = by_env.get(env_profile, 0) + count
+
+        return PantographManagerStats(
+            max_workers=self.max_workers,
+            max_workers_per_env_profile=self.max_workers_per_env_profile,
+            worker_startup_timeout_seconds=self.worker_startup_timeout_seconds,
+            free_workers=len(free),
+            busy_workers=len(busy),
+            starting_workers=sum(starting_by_env.values()),
+            total_workers=len(free) + len(busy) + sum(starting_by_env.values()),
+            workers_by_env_profile=by_env,
+            workers=worker_stats,
+        )
+
+    @staticmethod
+    def _lease_stats(
+        lease: PantographWorkerLease,
+        *,
+        status: str,
+    ) -> PantographWorkerStats:
+        pid_value = getattr(lease.worker, "pid", None)
+        pid = pid_value if isinstance(pid_value, int) else None
+        rss_getter = getattr(lease.worker, "process_tree_rss_bytes", None)
+        rss_value = rss_getter() if callable(rss_getter) else None
+        rss_bytes = rss_value if isinstance(rss_value, int) else None
+        return PantographWorkerStats(
+            env_profile=lease.env_profile,
+            header_hash=lease.header_hash,
+            status=status,
+            use_count=lease.use_count,
+            pid=pid,
+            rss_bytes=rss_bytes,
+        )
 
     def _ensure_lock(self) -> None:
         if self._lock is None:
