@@ -2,6 +2,12 @@
 
 Date: 2026-05-27
 
+Status as of 2026-05-30: this document is research-only. It is not the
+production backend plan for `main`. The mainline backend direction is the
+bounded old-command Pantograph process pool described in `../backend-end-plan.md`.
+Use this document only when explicitly returning to in-process Lean task /
+`pantograph_task` research.
+
 Goal: support at least one `/exec/step_batch` request containing 16 proof-state
 items with 8 tactics each, i.e. 128 tactic attempts, without running one
 Mathlib-loaded OS process per item.
