@@ -78,6 +78,8 @@ def runCoreM { α } (coreM : CoreM α) : EMainM α := do
     openDecls,
     options,
     initHeartbeats     :=  ← IO.getNumHeartbeats,
+    maxHeartbeats      := Core.getMaxHeartbeats options,
+    maxRecDepth        := maxRecDepth.get options,
     cancelTk?,
   }
   let coreState : Core.State := {
@@ -406,11 +408,32 @@ def runGoalStepBatchAttempt
   catch ex =>
     return goalStepBatchAttemptError tacticIdx tactic (.some (← ex.toMessageData.toString))
 
+def wrapIsolatedSync {α β : Type}
+    (act : α → CoreM β)
+    (cancelTk? : Option IO.CancelToken)
+    (maxHeartbeats? : Option Nat := .none) : CoreM (α → EIO Exception β) := do
+  let (childNGen, parentNGen) := (← getNGen).mkChild
+  setNGen parentNGen
+  let (childDeclNGen, parentDeclNGen) := (← getDeclNGen).mkChild
+  setDeclNGen parentDeclNGen
+  let st ← get
+  let st := { st with auxDeclNGen := childDeclNGen, ngen := childNGen }
+  let ctx ← read
+  let ctx := {
+    ctx with
+      cancelTk? := cancelTk?,
+      maxHeartbeats := maxHeartbeats?.getD ctx.maxHeartbeats,
+  }
+  return fun a => do
+    let initHeartbeats ← IO.getNumHeartbeats
+    (act a : CoreM _).run' { ctx with initHeartbeats } st
+
 def runGoalStepBatchItem
     (scope : Elab.Command.Scope)
     (options : Protocol.Options)
     (outputDir : System.FilePath)
-    (item : Protocol.GoalStepBatchItem) : CoreM OwnedGoalStepBatchItemResult := do
+    (item : Protocol.GoalStepBatchItem)
+    (maxHeartbeats? : Option Nat := .none) : CoreM OwnedGoalStepBatchItemResult := do
   let env ← getEnv
   let loaded? ← try
       let (parent, region) ← goalStateUnpickle item.parentPath (background? := .some env)
@@ -428,11 +451,30 @@ def runGoalStepBatchItem
         },
       }
   | .ok (parent, region) =>
+      let ctx ← read
       let mut results := #[]
       for tacticIdx in [:item.tactics.size] do
         let tactic := item.tactics[tacticIdx]!
-        let result ← runGoalStepBatchAttempt scope options parent outputDir item tacticIdx tactic
-        results := results.push result
+        let wrapped ← wrapIsolatedSync
+          (fun input =>
+            runGoalStepBatchAttempt
+              scope
+              options
+              parent
+              outputDir
+              item
+              input.fst
+              input.snd)
+          (cancelTk? := ctx.cancelTk?)
+          (maxHeartbeats? := maxHeartbeats?)
+        try
+          results := results.push (← wrapped (tacticIdx, tactic))
+        catch err =>
+          results := results.push <|
+            goalStepBatchAttemptError
+              tacticIdx
+              tactic
+              (.some s!"attempt failed: {← err.toMessageData.toString}")
       return {
         item := {
           itemIdx := item.itemIdx,
@@ -458,8 +500,32 @@ def runGoalStepBatchItems
     (options : Protocol.Options)
     (outputDir : System.FilePath)
     (items : Array Protocol.GoalStepBatchItem)
-    (maxParallelItems : Nat) : CoreM (Array OwnedGoalStepBatchItemResult) := do
+    (maxParallelItems : Nat)
+    (maxHeartbeats? : Option Nat := .none) : CoreM (Array OwnedGoalStepBatchItemResult) := do
   let parallel := Nat.max 1 maxParallelItems
+  if parallel == 1 then
+    let ctx ← read
+    let mut results := #[]
+    for item in items do
+      -- Use a child Core state/name generator, but execute synchronously. This
+      -- gives one-process batch semantics without sharing item-local scratch
+      -- state or entering Lean's task runtime.
+      let wrapped ← wrapIsolatedSync
+        (fun item =>
+          runGoalStepBatchItem
+            scope
+            options
+            outputDir
+            item
+            (maxHeartbeats? := maxHeartbeats?))
+        (cancelTk? := ctx.cancelTk?)
+      try
+        results := results.push (← wrapped item)
+      catch err =>
+        let message := s!"item failed: {← err.toMessageData.toString}"
+        results := results.push (goalStepBatchItemError item message)
+    return results
+
   let env ← getEnv
   let ctx ← read
   let st ← get
@@ -491,8 +557,19 @@ def goal_step_batch (args : Protocol.GoalStepBatch) : EMainM Protocol.GoalStepBa
   let state ← getMainState
   let scope := state.scope
   let options := state.options
-  let ownedResults ← runCoreM $
-    runGoalStepBatchItems scope options args.outputDir args.items args.maxParallelItems
+  let ownedResults ← runCoreM $ do
+    -- The parent command may execute many isolated item/attempt wrappers, so
+    -- its cumulative heartbeat budget must not collapse the whole batch. The
+    -- isolated wrappers inherit this unlimited command budget; this matches the
+    -- old goal.tactic path for replayed states from files that set
+    -- `maxHeartbeats 0`.
+    withTheReader Core.Context ({ · with maxHeartbeats := 0 }) <|
+      runGoalStepBatchItems
+        scope
+        options
+        args.outputDir
+        args.items
+        args.maxParallelItems
   let parentRegions := ownedResults.filterMap (·.parentRegion?)
   modify fun state => {
     state with

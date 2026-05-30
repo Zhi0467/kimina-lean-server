@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     max_tactics_per_step_item: int = 8
     max_attempts_per_step_batch: int = 128
     max_items_per_worker_batch: int = 16
-    max_parallel_items_per_lean_process: int = 16
+    # The stable Pantograph task slice batches multiple items into one command,
+    # but executes those items sequentially inside the Lean process. Values > 1
+    # opt into the experimental in-process task-parallel path.
+    max_parallel_items_per_lean_process: int = 1
     max_lean_processes_per_env_profile: int = -1
 
     init_repls: dict[str, int] = {}

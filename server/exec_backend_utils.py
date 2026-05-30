@@ -106,3 +106,24 @@ def distribute_items_across_lanes(
     for index, item in enumerate(items):
         lanes[index % effective_lane_count].append(item)
     return lanes
+
+
+def task_chunk_timeout_ms(
+    item_timeouts_ms: Sequence[int],
+    max_parallel_items: int,
+) -> int:
+    """Return a command timeout for one Lean-side task chunk.
+
+    ``goal.step_batch`` is one Pantograph command, so Python has only one
+    subprocess timeout for the whole chunk. Lean runs at most
+    ``max_parallel_items`` item tasks at a time; if that cap is 1, the timeout
+    must cover every item in sequence. For larger caps, the command timeout is
+    the sum of the slowest item in each wave.
+    """
+    if not item_timeouts_ms:
+        return 1
+    parallel = max(max_parallel_items, 1)
+    total = 0
+    for start in range(0, len(item_timeouts_ms), parallel):
+        total += max(item_timeouts_ms[start : start + parallel])
+    return max(total, 1)

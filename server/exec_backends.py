@@ -10,6 +10,7 @@ from .exec_backend_utils import (
     compatibility_key,
     distribute_items_across_lanes,
     group_items_by_compatibility,
+    task_chunk_timeout_ms,
 )
 from .pantograph_manager import (
     NoAvailablePantographWorkerError,
@@ -300,7 +301,7 @@ async def _run_process_pool_lane(
                 slots[resolved_item.index] = _item_error_result(
                     resolved_item.item, str(exc)
                 )
-            if lease is not None and not lease.worker.is_alive():
+            if not lease.worker.is_alive():
                 await return_worker(pantograph_manager, lease)
                 lease = None
     finally:
@@ -370,9 +371,10 @@ async def _execute_task_chunk(
 ) -> None:
     if not chunk:
         return
-    # This is a command-level timeout. Keep worker chunks no larger than the
-    # Lean-side parallel-item cap unless timeout semantics become per item.
-    timeout_ms = max(item.item.timeout_ms for item in chunk)
+    timeout_ms = task_chunk_timeout_ms(
+        [item.item.timeout_ms for item in chunk],
+        config.max_parallel_items_per_lean_process,
+    )
     first = chunk[0]
     lease = None
     try:

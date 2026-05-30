@@ -82,6 +82,7 @@ def test_exec_backend_defaults_to_process_pool() -> None:
     # sequential and memory-bounded (mmap-shared Mathlib). With no explicit
     # per-profile cap it resolves to DEFAULT_PROCESS_POOL_LANES worker lanes.
     assert settings.exec_backend == "pantograph_process_pool"
+    assert settings.max_parallel_items_per_lean_process == 1
     assert settings.max_lean_processes_per_env_profile == -1
     assert (
         effective_max_lean_processes_per_env_profile(settings)

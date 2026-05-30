@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from server.pantograph_worker import PantographWorker
+from server.pantograph_worker import PantographBatchStepInput, PantographWorker
 
 
 @pytest.fixture
@@ -117,6 +117,45 @@ async def test_goal_step_batch_direct_wrapper_steps_items_in_one_process(
         assert resumed[0].status == "complete"
 
 
+async def test_goal_step_batch_sequential_cap_matches_single_item_step_path(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    assert created.status == "open"
+    parent_path = created.states[0].path
+    tactics = ["simp", "rw [Nat.add_comm]", "bad_tactic"]
+
+    expected = await pantograph_worker.step_state_with_tactics(
+        parent_path,
+        tactics,
+        state_dir=tmp_path / "single",
+    )
+    batch = await pantograph_worker.step_state_batch_with_tactics(
+        [
+            PantographBatchStepInput(
+                item_index=0,
+                state_path=parent_path,
+                tactics=tactics,
+            )
+        ],
+        state_dir=tmp_path / "batch",
+        max_parallel_items=1,
+    )
+
+    assert len(batch) == 1
+    assert [
+        (result.tactic, result.status, result.goals, result.state_path is not None)
+        for result in batch[0].results
+    ] == [
+        (result.tactic, result.status, result.goals, result.state_path is not None)
+        for result in expected
+    ]
+
+
 async def test_goal_step_batch_direct_wrapper_handles_16_by_8_capacity(
     pantograph_worker: PantographWorker,
     tmp_path: Path,
@@ -147,7 +186,7 @@ async def test_goal_step_batch_direct_wrapper_handles_16_by_8_capacity(
             for idx in range(16)
         ],
         output_dir=str(tmp_path),
-        max_parallel_items=16,
+        max_parallel_items=1,
     )
 
     assert len(result["items"]) == 16

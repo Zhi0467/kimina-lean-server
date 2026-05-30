@@ -12,6 +12,7 @@ from server.exec_backends import (
     execute_step_batch_request,
     validate_step_batch_caps,
 )
+from server.exec_backend_utils import task_chunk_timeout_ms
 from server.pantograph_worker import (
     PantographBatchStepInput,
     PantographBatchStepItemResult,
@@ -47,6 +48,12 @@ def _config(
     )
 
 
+def test_task_chunk_timeout_covers_sequential_waves() -> None:
+    assert task_chunk_timeout_ms([1000, 2500, 3000], max_parallel_items=1) == 6500
+    assert task_chunk_timeout_ms([1000, 2500, 3000], max_parallel_items=2) == 5500
+    assert task_chunk_timeout_ms([1000, 2500, 3000], max_parallel_items=16) == 3000
+
+
 @dataclass
 class _FakeLease:
     worker: "_FakeTaskWorker"
@@ -57,6 +64,7 @@ class _FakeTaskWorker:
         self.calls: list[list[PantographBatchStepInput]] = []
         self.pool_calls: list[Path] = []
         self.parallel_caps: list[int] = []
+        self.timeout_seconds: int | None = None
         self.gc_calls = 0
 
     async def step_state_with_tactics(
@@ -205,6 +213,55 @@ async def test_task_backend_groups_compatible_items_into_one_worker_batch(
     assert len(worker.calls) == 1
     assert [item.item_index for item in worker.calls[0]] == [0, 1]
     assert worker.parallel_caps == [7]
+
+
+@pytest.mark.asyncio
+async def test_task_backend_timeout_covers_sequential_chunk(
+    tmp_path: Path,
+) -> None:
+    token_iter = iter(["st_0", "st_1"])
+    store = StateStore(
+        tmp_path / "store",
+        token_factory=token_iter.__next__,
+    )
+    tokens = [
+        store.put(
+            _write_state(tmp_path / f"root_{idx}.bin"),
+            item_id=f"item_{idx}",
+            env_profile="env",
+            header="import Init",
+            header_hash="same",
+        )
+        for idx in range(2)
+    ]
+    request = StepBatchRequest(
+        items=[
+            {
+                "node_id": "n0",
+                "state_token": tokens[0],
+                "tactics": ["simp"],
+                "timeout_ms": 1000,
+            },
+            {
+                "node_id": "n1",
+                "state_token": tokens[1],
+                "tactics": ["simp"],
+                "timeout_ms": 2500,
+            },
+        ]
+    )
+    worker = _FakeTaskWorker()
+    manager = _FakeManager(worker)
+
+    await execute_step_batch_request(
+        request,
+        state_store=store,
+        pantograph_manager=manager,  # type: ignore[arg-type]
+        config=_config(max_parallel_items_per_lean_process=1),
+    )
+
+    assert manager.leases[0][2] == 3.5
+    assert worker.timeout_seconds == 4
 
 
 @pytest.mark.asyncio
