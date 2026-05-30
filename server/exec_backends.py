@@ -8,6 +8,7 @@ from .exec_backend_utils import (
     distribute_items_across_lanes,
     group_items_by_compatibility,
 )
+from .exec_lifecycle import ItemLifecycleRegistry
 from .pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
@@ -15,6 +16,7 @@ from .pantograph_manager import (
 )
 from .pantograph_worker import PantographStepResult
 from .schemas_exec import (
+    ExecStatus,
     StepBatchItem,
     StepBatchRequest,
     StepBatchResponse,
@@ -30,6 +32,8 @@ class StepBatchBackendConfig:
     max_tactics_per_step_item: int
     max_attempts_per_step_batch: int
     max_lean_processes_per_env_profile: int
+    max_acquire_timeout_ms: int
+    max_step_timeout_ms: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ async def execute_step_batch_request(
     *,
     state_store: StateStore,
     pantograph_manager: PantographManager,
+    lifecycle: ItemLifecycleRegistry,
     config: StepBatchBackendConfig,
 ) -> StepBatchResponse:
     validate_step_batch_caps(request, config)
@@ -55,6 +60,7 @@ async def execute_step_batch_request(
         request,
         state_store=state_store,
         pantograph_manager=pantograph_manager,
+        lifecycle=lifecycle,
         config=config,
     )
     return StepBatchResponse(items=items)
@@ -77,6 +83,16 @@ def validate_step_batch_caps(
                 f"max_tactics_per_step_item={config.max_tactics_per_step_item}"
             )
         attempts += len(item.tactics)
+        if item.acquire_timeout_ms > config.max_acquire_timeout_ms:
+            raise StepBatchCapError(
+                "step_batch acquire timeout exceeds "
+                f"max_acquire_timeout_ms={config.max_acquire_timeout_ms}"
+            )
+        if item.step_timeout_ms > config.max_step_timeout_ms:
+            raise StepBatchCapError(
+                "step_batch step timeout exceeds "
+                f"max_step_timeout_ms={config.max_step_timeout_ms}"
+            )
     if attempts > config.max_attempts_per_step_batch:
         raise StepBatchCapError(
             "step_batch tactic attempts exceed "
@@ -89,6 +105,7 @@ async def execute_step_batch_process_pool(
     *,
     state_store: StateStore,
     pantograph_manager: PantographManager,
+    lifecycle: ItemLifecycleRegistry,
     config: StepBatchBackendConfig,
 ) -> list[StepBatchResult]:
     """Run step items through bounded old-command Pantograph worker lanes.
@@ -101,13 +118,24 @@ async def execute_step_batch_process_pool(
     slots: list[StepBatchResult | None] = [None] * len(request.items)
     resolved: list[ResolvedStepItem] = []
     pinned_tokens: list[str] = []
+    active_item_ids: list[str] = []
     for index, item in enumerate(request.items):
         try:
             record = state_store.resolve_and_pin(item.state_token)
         except StateTokenNotFound as exc:
             slots[index] = _invalid_token_result(item, exc)
             continue
+        begin = lifecycle.begin(record.item_id)
+        if not begin.started:
+            state_store.unpin(item.state_token)
+            slots[index] = _item_status_result(
+                item,
+                "cancelled",
+                f"item {record.item_id!r} is cancelled",
+            )
+            continue
         pinned_tokens.append(item.state_token)
+        active_item_ids.append(record.item_id)
         resolved.append(ResolvedStepItem(index=index, item=item, record=record))
 
     try:
@@ -125,6 +153,7 @@ async def execute_step_batch_process_pool(
                     slots=slots,
                     state_store=state_store,
                     pantograph_manager=pantograph_manager,
+                    lifecycle=lifecycle,
                     max_lanes=config.max_lean_processes_per_env_profile,
                 )
                 for group in groups
@@ -132,6 +161,8 @@ async def execute_step_batch_process_pool(
         )
     finally:
         state_store.unpin_many(pinned_tokens)
+        for item_id in active_item_ids:
+            lifecycle.finish(item_id)
 
     return [
         result
@@ -147,6 +178,7 @@ async def _run_process_pool_group(
     slots: list[StepBatchResult | None],
     state_store: StateStore,
     pantograph_manager: PantographManager,
+    lifecycle: ItemLifecycleRegistry,
     max_lanes: int,
 ) -> None:
     lanes = distribute_items_across_lanes(group_items, max_lanes)
@@ -157,6 +189,7 @@ async def _run_process_pool_group(
                 slots=slots,
                 state_store=state_store,
                 pantograph_manager=pantograph_manager,
+                lifecycle=lifecycle,
             )
             for lane in lanes
         )
@@ -169,25 +202,34 @@ async def _run_process_pool_lane(
     slots: list[StepBatchResult | None],
     state_store: StateStore,
     pantograph_manager: PantographManager,
+    lifecycle: ItemLifecycleRegistry,
 ) -> None:
     lease: PantographWorkerLease | None = None
     try:
         for resolved_item in lane_items:
+            if lifecycle.should_cancel(resolved_item.record.item_id):
+                slots[resolved_item.index] = _item_status_result(
+                    resolved_item.item,
+                    "cancelled",
+                    f"item {resolved_item.record.item_id!r} is cancelled",
+                )
+                continue
             if lease is None:
                 try:
                     lease = await pantograph_manager.get_worker(
                         env_profile=resolved_item.record.env_profile,
                         header=resolved_item.record.header,
-                        timeout=resolved_item.item.timeout_ms / 1000,
+                        timeout=resolved_item.item.acquire_timeout_ms / 1000,
                     )
                 except NoAvailablePantographWorkerError as exc:
-                    slots[resolved_item.index] = _item_error_result(
+                    slots[resolved_item.index] = _item_status_result(
                         resolved_item.item,
+                        "overloaded",
                         str(exc),
                     )
                     continue
             lease.worker.set_timeout_seconds(
-                _timeout_seconds(resolved_item.item.timeout_ms)
+                _timeout_seconds(resolved_item.item.step_timeout_ms)
             )
             try:
                 worker_results = await lease.worker.step_state_with_tactics(
@@ -256,10 +298,18 @@ def _invalid_token_result(
 
 
 def _item_error_result(item: StepBatchItem, message: str) -> StepBatchResult:
+    return _item_status_result(item, "error", message)
+
+
+def _item_status_result(
+    item: StepBatchItem,
+    status: ExecStatus,
+    message: str,
+) -> StepBatchResult:
     return StepBatchResult(
         node_id=item.node_id,
         results=[
-            StepResult(tactic=tactic, status="error", messages=[message])
+            StepResult(tactic=tactic, status=status, messages=[message])
             for tactic in item.tactics
         ],
     )

@@ -161,6 +161,44 @@ def test_pinned_state_is_not_deleted_until_unpinned(tmp_path: Path) -> None:
     assert not record.path.exists()
 
 
+def test_delete_by_item_id_all_or_none_defers_when_any_state_is_pinned(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(
+        tmp_path / "store",
+        token_factory=_token_factory("st_root", "st_child"),
+    )
+    root = store.put(
+        _write_state(tmp_path / "root.bin", b"root"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+    child = store.put(
+        _write_state(tmp_path / "child.bin", b"child"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header_hash="header",
+    )
+
+    store.resolve_and_pin(root)
+    deferred = store.delete_by_item_id_all_or_none("theorem_42:a0")
+
+    assert not deferred.deleted
+    assert deferred.pinned_states == 1
+    assert deferred.stats.deleted_states == 0
+    assert store.count_by_item_id("theorem_42:a0") == 2
+    assert store.resolve(root).path.exists()
+    assert store.resolve(child).path.exists()
+
+    store.unpin(root)
+    deleted = store.delete_by_item_id_all_or_none("theorem_42:a0")
+
+    assert deleted.deleted
+    assert deleted.stats.deleted_states == 2
+    assert store.count_by_item_id("theorem_42:a0") == 0
+
+
 def test_gc_expired_deletes_stale_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store = StateStore(tmp_path / "store", ttl_seconds=10, token_factory=_token_factory("st_old"))

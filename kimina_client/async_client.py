@@ -15,11 +15,14 @@ from tqdm.asyncio import tqdm_asyncio
 
 from .base import BaseKimina
 from .exec_models import (
+    ExecCancelRequest,
+    ExecCancelResponse,
     ExecCleanupRequest,
     ExecCleanupResponse,
     ExecCreateStateItem,
     ExecCreateStatesRequest,
     ExecCreateStatesResponse,
+    ExecLimitsResponse,
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
@@ -28,6 +31,10 @@ from .models import CheckRequest, CheckResponse, Infotree, ReplResponse, Snippet
 from .utils import build_log, find_code_column, find_id_column
 
 logger = logging.getLogger("kimina-client")
+
+
+def _is_non_idempotent_exec_url(url: str) -> bool:
+    return url.endswith("/exec/create_states") or url.endswith("/exec/step_batch")
 
 
 class AsyncKiminaClient(BaseKimina):
@@ -154,15 +161,21 @@ class AsyncKiminaClient(BaseKimina):
         resp = await self._query(url, payload)
         return self.handle(resp, ExecCleanupResponse)
 
+    async def exec_cancel(self, item_ids: list[str]) -> ExecCancelResponse:
+        url = self.build_url("/exec/cancel")
+        payload = ExecCancelRequest(item_ids=item_ids).model_dump()
+        resp = await self._query(url, payload)
+        return self.handle(resp, ExecCancelResponse)
+
+    async def exec_limits(self) -> ExecLimitsResponse:
+        url = self.build_url("/exec/limits")
+        resp = await self._query(url, method="GET")
+        return self.handle(resp, ExecLimitsResponse)
+
     async def _query(
         self, url: str, payload: dict[str, Any] | None = None, method: str = "POST"
     ) -> Any:
-        @retry(
-            stop=stop_after_attempt(self.n_retries),
-            wait=wait_exponential(multiplier=1, min=1, max=10),
-            before_sleep=before_sleep_log(logger, logging.ERROR),
-        )
-        async def run_method() -> Any:
+        async def run_method_once() -> Any:
             try:
                 if method.upper() == "POST":
                     response = await self.session.post(url, json=payload)
@@ -181,8 +194,18 @@ class AsyncKiminaClient(BaseKimina):
                 logger.error(f"Server returned non-JSON: {response.text}")
                 raise ValueError("Invalid response from server: not a valid JSON")
 
+        @retry(
+            stop=stop_after_attempt(self.n_retries),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+            before_sleep=before_sleep_log(logger, logging.ERROR),
+        )
+        async def run_method_with_retry() -> Any:
+            return await run_method_once()
+
         try:
-            return await run_method()
+            if _is_non_idempotent_exec_url(url):
+                return await run_method_once()
+            return await run_method_with_retry()
         except RetryError:
             raise RuntimeError(f"Request failed after {self.n_retries} retries")
 

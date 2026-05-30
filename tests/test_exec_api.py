@@ -7,8 +7,10 @@ from typing import Any, cast
 import pytest
 from fastapi.testclient import TestClient
 
+from server.exec_backends import return_worker as _return_worker
 from server.main import create_app
-from server.routers.exec import _return_worker, cleanup as cleanup_endpoint
+from server.routers.exec import cleanup as cleanup_endpoint
+from server.exec_lifecycle import ItemLifecycleRegistry
 from server.schemas_exec import CleanupRequest
 from server.settings import Environment, Settings
 from server.state_store import StateStore
@@ -19,13 +21,15 @@ def _write_state(path: Path, data: bytes = b"state") -> Path:
     return path
 
 
-def _test_client(tmp_path: Path) -> TestClient:
+def _test_client(tmp_path: Path, **overrides: Any) -> TestClient:
     settings = Settings(_env_file=None)
     settings.database_url = None
     settings.environment = Environment.prod
     settings.init_repls = {}
     settings.state_store_dir = tmp_path / "state-store"
     settings.max_pantograph_workers = 1
+    for key, value in overrides.items():
+        setattr(settings, key, value)
     return TestClient(create_app(settings))
 
 
@@ -117,12 +121,54 @@ async def test_cleanup_endpoint_deletes_by_item_id_unit(tmp_path: Path) -> None:
     response = await cleanup_endpoint(
         CleanupRequest(item_ids=["theorem_42:a0"]),
         state_store=store,
+        lifecycle=ItemLifecycleRegistry(),
         _api_key=None,
     )
 
     assert response.deleted_items[0].item_id == "theorem_42:a0"
+    assert response.deleted_items[0].status == "deleted"
     assert response.deleted_items[0].deleted_states == 1
     assert response.deleted_items[0].deleted_bytes == len(b"root")
+    assert not state_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_endpoint_defers_while_lifecycle_is_active(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store", token_factory=lambda: "st_root")
+    lifecycle = ItemLifecycleRegistry()
+    token = store.put(
+        _write_state(tmp_path / "root.bin", b"root"),
+        item_id="theorem_42:a0",
+        env_profile="env",
+        header="import Init",
+        header_hash="header",
+    )
+    state_path = store.resolve(token).path
+    lifecycle.begin("theorem_42:a0")
+
+    deferred = await cleanup_endpoint(
+        CleanupRequest(item_ids=["theorem_42:a0"]),
+        state_store=store,
+        lifecycle=lifecycle,
+        _api_key=None,
+    )
+
+    assert deferred.deleted_items[0].status == "deferred"
+    assert deferred.deleted_items[0].reason == "in_flight"
+    assert deferred.deleted_items[0].deleted_states == 0
+    assert state_path.exists()
+
+    lifecycle.finish("theorem_42:a0")
+    deleted = await cleanup_endpoint(
+        CleanupRequest(item_ids=["theorem_42:a0"]),
+        state_store=store,
+        lifecycle=lifecycle,
+        _api_key=None,
+    )
+
+    assert deleted.deleted_items[0].status == "deleted"
     assert not state_path.exists()
 
 
@@ -146,6 +192,9 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
             "deleted_items": [
                 {
                     "item_id": "theorem_42:a0",
+                    "status": "deleted",
+                    "in_flight": 0,
+                    "pinned_states": 0,
                     "deleted_states": 1,
                     "deleted_bytes": len(b"root"),
                 }
@@ -153,6 +202,61 @@ def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
         }
         assert not state_path.exists()
         assert store.stats().state_count == 0
+
+
+def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
+    with _test_client(tmp_path) as client:
+        cancel_response = client.post(
+            "/exec/cancel",
+            json={"item_ids": ["theorem_42:a0"]},
+        )
+        assert cancel_response.status_code == 200
+        assert cancel_response.json()["items"] == [
+            {"item_id": "theorem_42:a0", "status": "drained", "in_flight": 0}
+        ]
+
+        limits_response = client.get("/exec/limits")
+        assert limits_response.status_code == 200
+        payload = limits_response.json()
+        assert payload["recommended_items_per_step_batch"] == 16
+        assert payload["same_item_id_pipelining"] is False
+
+
+def test_exec_routes_reject_oversized_create_before_worker_leasing(
+    tmp_path: Path,
+) -> None:
+    with _test_client(tmp_path, max_create_items_per_request=1) as client:
+        response = client.post(
+            "/exec/create_states",
+            json={
+                "env_profile": "lean_init_test",
+                "items": [
+                    {"item_id": "a", "code": "theorem a : True := by trivial"},
+                    {"item_id": "b", "code": "theorem b : True := by trivial"},
+                ],
+            },
+        )
+
+        assert response.status_code == 422
+        assert "max_create_items_per_request=1" in response.text
+
+
+def test_exec_routes_reject_oversized_step_before_token_resolution(
+    tmp_path: Path,
+) -> None:
+    with _test_client(tmp_path, max_items_per_step_batch=1) as client:
+        response = client.post(
+            "/exec/step_batch",
+            json={
+                "items": [
+                    {"node_id": "n0", "state_token": "st_missing_0", "tactics": ["simp"]},
+                    {"node_id": "n1", "state_token": "st_missing_1", "tactics": ["simp"]},
+                ]
+            },
+        )
+
+        assert response.status_code == 422
+        assert "max_items_per_step_batch=1" in response.text
 
 
 def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> None:
@@ -207,6 +311,7 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
             json={"item_ids": ["theorem_42:a0"]},
         )
         assert cleanup_response.status_code == 200
+        assert cleanup_response.json()["deleted_items"][0]["status"] == "deleted"
         assert cleanup_response.json()["deleted_items"][0]["deleted_states"] == 2
 
 

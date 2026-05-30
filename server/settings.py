@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     max_items_per_step_batch: int = 1024
     max_tactics_per_step_item: int = 64
     max_attempts_per_step_batch: int = 8192
+    max_create_items_per_request: int = 1024
+    max_acquire_timeout_ms: int = 600_000
+    max_step_timeout_ms: int = 600_000
+    max_in_flight_exec_requests: int = -1
+    max_queued_exec_requests: int = -1
+    recommended_items_per_step_batch: int = 16
+    recommended_in_flight_step_batches: int = 4
+    item_lifecycle_terminal_retention_seconds: int = 660
 
     init_repls: dict[str, int] = {}
 

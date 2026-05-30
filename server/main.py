@@ -10,6 +10,8 @@ from pydantic.json_schema import GenerateJsonSchema
 
 from .__version__ import __version__
 from .db import db
+from .exec_lifecycle import ItemLifecycleRegistry
+from .exec_request_limiter import ExecRequestLimiter
 from .logger import setup_logging
 from .manager import Manager
 from .pantograph_manager import PantographManager
@@ -57,6 +59,15 @@ def create_app(settings: Settings) -> FastAPI:
             settings.state_store_dir,
             ttl_seconds=settings.state_ttl_seconds,
             max_bytes=settings.max_state_store_bytes,
+        )
+        app.state.exec_lifecycle = ItemLifecycleRegistry(
+            terminal_retention_seconds=(
+                settings.item_lifecycle_terminal_retention_seconds
+            )
+        )
+        app.state.exec_request_limiter = ExecRequestLimiter(
+            max_in_flight=settings.max_in_flight_exec_requests,
+            max_queued=settings.max_queued_exec_requests,
         )
         app.state.pantograph_manager = PantographManager(
             max_workers=settings.max_pantograph_workers,

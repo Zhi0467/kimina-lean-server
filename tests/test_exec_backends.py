@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from server.exec_backend_utils import distribute_items_across_lanes
 from server.exec_backends import StepBatchBackendConfig, execute_step_batch_request
+from server.exec_lifecycle import ItemLifecycleRegistry
 from server.pantograph_manager import PantographManager, header_hash
 from server.pantograph_worker import PantographStepResult
 from server.schemas_exec import StepBatchItem, StepBatchRequest
@@ -48,6 +50,28 @@ class _FakeWorker:
         return None
 
 
+class _BlockingWorker(_FakeWorker):
+    def __init__(self, *, started: asyncio.Event, release: asyncio.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    async def step_state_with_tactics(
+        self,
+        state_path: Path,
+        tactics: list[str],
+        *,
+        state_dir: Path,
+    ) -> list[PantographStepResult]:
+        self.step_calls.append((state_path, list(tactics)))
+        self.started.set()
+        await self.release.wait()
+        return [
+            PantographStepResult(tactic=tactic, status="complete")
+            for tactic in tactics
+        ]
+
+
 class _FakeWorkerFactory:
     def __init__(self) -> None:
         self.workers: list[_FakeWorker] = []
@@ -64,12 +88,28 @@ class _FakeWorkerFactory:
         return worker
 
 
+class _BlockingWorkerFactory:
+    def __init__(self, worker: _BlockingWorker) -> None:
+        self.worker = worker
+
+    async def __call__(
+        self,
+        imports: list[str],
+        project_path: str | None,
+        timeout_seconds: int,
+        buffer_limit: int | None,
+    ) -> _BlockingWorker:
+        return self.worker
+
+
 def _config(max_lanes: int) -> StepBatchBackendConfig:
     return StepBatchBackendConfig(
         max_items_per_step_batch=16,
         max_tactics_per_step_item=8,
         max_attempts_per_step_batch=128,
         max_lean_processes_per_env_profile=max_lanes,
+        max_acquire_timeout_ms=10_000,
+        max_step_timeout_ms=10_000,
     )
 
 
@@ -87,6 +127,7 @@ async def test_process_pool_reuses_one_worker_for_single_lane(tmp_path: Path) ->
         for index in range(3)
     ]
     factory = _FakeWorkerFactory()
+    lifecycle = ItemLifecycleRegistry()
     manager = PantographManager(
         max_workers=4,
         max_workers_per_env_profile=1,
@@ -107,6 +148,7 @@ async def test_process_pool_reuses_one_worker_for_single_lane(tmp_path: Path) ->
         ),
         state_store=store,
         pantograph_manager=manager,
+        lifecycle=lifecycle,
         config=_config(max_lanes=1),
     )
 
@@ -116,6 +158,11 @@ async def test_process_pool_reuses_one_worker_for_single_lane(tmp_path: Path) ->
         [result.status for result in item.results]
         for item in response.items
     ] == [["complete", "complete"]] * 3
+    assert [lifecycle.snapshot(f"item_{index}").in_flight for index in range(3)] == [
+        0,
+        0,
+        0,
+    ]
 
     await manager.cleanup()
 
@@ -134,6 +181,7 @@ async def test_process_pool_splits_incompatible_headers(tmp_path: Path) -> None:
             )
         )
     factory = _FakeWorkerFactory()
+    lifecycle = ItemLifecycleRegistry()
     manager = PantographManager(max_workers=4, worker_factory=factory)
 
     await execute_step_batch_request(
@@ -150,12 +198,149 @@ async def test_process_pool_splits_incompatible_headers(tmp_path: Path) -> None:
         ),
         state_store=store,
         pantograph_manager=manager,
+        lifecycle=lifecycle,
         config=_config(max_lanes=1),
     )
 
     assert len(factory.workers) == 2
     assert [len(worker.step_calls) for worker in factory.workers] == [1, 1]
 
+    await manager.cleanup()
+
+
+async def test_step_batch_returns_cancelled_for_cancelled_item(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    factory = _FakeWorkerFactory()
+    lifecycle = ItemLifecycleRegistry()
+    lifecycle.cancel("item_0")
+    manager = PantographManager(max_workers=1, worker_factory=factory)
+
+    response = await execute_step_batch_request(
+        StepBatchRequest(
+            items=[
+                StepBatchItem(
+                    node_id="item_0:n0",
+                    state_token=token,
+                    tactics=["simp", "rfl"],
+                    timeout_ms=1000,
+                )
+            ]
+        ),
+        state_store=store,
+        pantograph_manager=manager,
+        lifecycle=lifecycle,
+        config=_config(max_lanes=1),
+    )
+
+    assert [result.status for result in response.items[0].results] == [
+        "cancelled",
+        "cancelled",
+    ]
+    assert factory.workers == []
+
+
+async def test_step_batch_reports_acquire_timeout_as_overloaded(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    factory = _FakeWorkerFactory()
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(max_workers=1, worker_factory=factory)
+    lease = await manager.get_worker(env_profile="env", header=header, timeout=1)
+
+    try:
+        response = await execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id="item_0:n0",
+                        state_token=token,
+                        tactics=["simp"],
+                        acquire_timeout_ms=1,
+                        step_timeout_ms=1000,
+                    )
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    finally:
+        await manager.release_worker(lease)
+        await manager.cleanup()
+
+    assert response.items[0].results[0].status == "overloaded"
+    assert store.count_by_item_id("item_0") == 1
+
+
+async def test_cancel_skips_later_items_in_same_lane(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    tokens = [
+        store.put(
+            _write_state(tmp_path / f"state_{index}.bin"),
+            item_id="item_0",
+            env_profile="env",
+            header=header,
+            header_hash=header_hash(header),
+        )
+        for index in range(2)
+    ]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    worker = _BlockingWorker(started=started, release=release)
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(
+        max_workers=1,
+        worker_factory=_BlockingWorkerFactory(worker),
+    )
+
+    task = asyncio.create_task(
+        execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id=f"item_0:n{index}",
+                        state_token=token,
+                        tactics=["simp"],
+                        timeout_ms=1000,
+                    )
+                    for index, token in enumerate(tokens)
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    )
+    await started.wait()
+    assert lifecycle.cancel("item_0").status == "cancelling"
+    release.set()
+    response = await task
+
+    assert response.items[0].results[0].status == "complete"
+    assert response.items[1].results[0].status == "cancelled"
+    assert lifecycle.snapshot("item_0").status == "drained"
     await manager.cleanup()
 
 

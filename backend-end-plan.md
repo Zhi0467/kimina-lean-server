@@ -128,9 +128,9 @@ in-flight bound   from recommended_in_flight_step_batches, with `overloaded` /
 
 This removes the static `max_items` / `max_wait_ms` / `max_in_flight_batches`
 knobs and the risk of a client batch size that disagrees with the server cap. The
-current code instead uses fixed defaults (32 items, 5ms, 2 in-flight), and the
-plain `step_batch` path does not split at all; aligning it with derived sizing is
-Phase 4 work.
+Stage 4 client path now has `from_server_limits(...)` and resumable
+microbatching; callers that bypass the batcher and invoke raw `step_batch`
+directly are still responsible for staying under server caps.
 
 The recommended item count is not the same as worker count. A 16-item request is
 valid with four workers: the server creates four lanes and each lane processes
@@ -984,28 +984,24 @@ Already implemented on `main`:
   worker use recycling, startup timeout floor, per-env-profile cap, and stats.
 - Server exec scheduler for `/exec/step_batch` with cap validation,
   compatibility grouping, bounded lanes, and input-order output.
-- Async EnvClient and microbatcher shape.
+- Item lifecycle registry, all-or-nothing public cleanup, deferred cleanup, and
+  cooperative cancel.
+- Split acquire/step timeout schema with deprecated `timeout_ms` compatibility.
+- `overloaded` and `cancelled` exec statuses.
+- `/exec/cancel` and `/exec/limits`.
+- Create/step caps, route-level exec request limiter, and retryable overload
+  responses.
+- Async EnvClient, derived-limit batcher setup, observed-overload retry,
+  same-`item_id` request serialization, and JSON microbatch resume journal.
 
 Known gaps:
 
-- `/exec/create_states` lacks the same caps/backpressure discipline as
-  `/exec/step_batch`.
-- `timeout_ms` conflates the worker-acquire wait with per-tactic execution time;
-  they need separate knobs.
-- Acquisition contention collapses into per-item `status="error"`; there is no
-  `overloaded` status, so pool busyness is indistinguishable from a failed
-  tactic.
-- Cleanup has no item lifecycle tracking: it can race in-flight work for the same
-  `item_id` and return a misleading 200 while skipping pinned parents. Needs a
-  lifecycle registry, an all-or-nothing cleanup delete path, deferred cleanup,
-  and a `/exec/cancel` endpoint (Phase 2).
-- Exec client calls use generic retry behavior; create/step are not safely
-  idempotent yet.
-- Client-side persisted microbatch progress does not exist yet.
-- The client batcher uses static `max_items` / `max_wait_ms` / `max_in_flight`
-  constants unaware of server caps; there is no `GET /exec/limits` for the client
-  to derive microbatch shape, and the plain `step_batch` path does not split.
 - No production stats endpoint for worker/state/load metrics.
+- Whole-system Goedel E2E benchmark and soak have not been run for this final
+  Stage 4 implementation.
+- Server-side idempotency keys are still not implemented. The Stage 4 client
+  marks unknown microbatch outcomes as uncertain instead of blindly replaying
+  them under the same attempt.
 
 ## Benchmark And Test Gates By Phase
 
@@ -1173,11 +1169,10 @@ This is the point where we can claim the backend works as a system.
 
 ## Production Roadmap
 
-The next implementation slice is Phase 2A only: item lifecycle registry +
-deferred cleanup. Do not start client resume, limits, cancel, or broad throughput
-benchmark work until Phase 2A is green. The only benchmark work in Phase 2A is
-the cleanup race gate above. It is small, falsifiable, and fixes the correctness
-race that can otherwise corrupt cleanup semantics.
+The next implementation slice is Phase 5: observability and health. Phases 2A,
+2B, 3, and 4 are implemented and covered by focused tests. Do not call the backend
+production-ready until Phase 5 metrics make benchmark results interpretable and
+Phase 6 completes the real Goedel E2E/soak gate.
 
 Phase 2A is done only when:
 
@@ -1206,8 +1201,9 @@ Acceptance:
 
 ### Phase 2: Cleanup Race Safety
 
-Phase 2A -- required next implementation slice: item lifecycle registry +
-deferred cleanup.
+Status: implemented.
+
+Phase 2A -- item lifecycle registry + deferred cleanup.
 
 - Add an in-memory per-`item_id` registry (`status`, `in_flight_count`,
   `terminal_expires_at`) in a dedicated server module.
@@ -1281,6 +1277,8 @@ Phase 2B tests:
 
 ### Phase 3: API Caps And Backpressure
 
+Status: implemented.
+
 - Add create-state request caps.
 - Split `timeout_ms` into `acquire_timeout_ms` and `step_timeout_ms` and validate
   both (see Timeouts).
@@ -1315,6 +1313,8 @@ Tests:
   lease and no state-store writes.
 
 ### Phase 4: Client-Side Exec Semantics
+
+Status: implemented.
 
 - Stop blind automatic retries for non-idempotent `/exec/create_states` and
   `/exec/step_batch`, or add idempotency keys before retrying them. Follow the

@@ -12,12 +12,18 @@ from ..exec_backends import (
     execute_step_batch_request,
     return_worker as _return_worker,
 )
+from ..exec_lifecycle import ItemLifecycleRegistry
+from ..exec_request_limiter import ExecRequestLimiter, ExecRequestRejected
 from ..pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
     header_hash,
 )
 from ..schemas_exec import (
+    CancelRequest,
+    CancelResponse,
+    CancelResult,
+    CancelStatus,
     CleanupRequest,
     CleanupResponse,
     CleanupResult,
@@ -25,6 +31,7 @@ from ..schemas_exec import (
     CreateStatesRequest,
     CreateStatesResponse,
     CreateStatesResult,
+    ExecLimitsResponse,
     StateInfo,
     StepBatchRequest,
     StepBatchResponse,
@@ -48,6 +55,14 @@ def get_settings(request: Request) -> Settings:
     return cast(Settings, request.app.state.settings)
 
 
+def get_exec_lifecycle(request: Request) -> ItemLifecycleRegistry:
+    return cast(ItemLifecycleRegistry, request.app.state.exec_lifecycle)
+
+
+def get_exec_request_limiter(request: Request) -> ExecRequestLimiter:
+    return cast(ExecRequestLimiter, request.app.state.exec_request_limiter)
+
+
 @router.post(
     "/create_states",
     response_model=CreateStatesResponse,
@@ -57,9 +72,22 @@ async def create_states(
     request: CreateStatesRequest,
     state_store: StateStore = Depends(get_state_store),
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    limiter: ExecRequestLimiter = Depends(get_exec_request_limiter),
+    settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> CreateStatesResponse:
+    _validate_create_request(request, settings)
+
     async def create_one(item: CreateStatesItem) -> CreateStatesResult:
+        begin = lifecycle.begin(item.item_id)
+        if not begin.started:
+            return CreateStatesResult(
+                item_id=item.item_id,
+                status="cancelled",
+                messages=[f"item {item.item_id!r} is cancelled"],
+            )
+
         split_result = split_snippet(item.code)
         item_header_hash = header_hash(split_result.header)
         lease = None
@@ -67,9 +95,9 @@ async def create_states(
             lease = await pantograph_manager.get_worker(
                 env_profile=request.env_profile,
                 header=split_result.header,
-                timeout=item.timeout_ms / 1000,
+                timeout=item.acquire_timeout_ms / 1000,
             )
-            lease.worker.set_timeout_seconds(_timeout_seconds(item.timeout_ms))
+            lease.worker.set_timeout_seconds(_timeout_seconds(item.step_timeout_ms))
             result = await lease.worker.create_states_from_code(
                 split_result.body,
                 state_dir=state_store.root_dir,
@@ -96,7 +124,7 @@ async def create_states(
         except NoAvailablePantographWorkerError as exc:
             return CreateStatesResult(
                 item_id=item.item_id,
-                status="error",
+                status="overloaded",
                 messages=[str(exc)],
             )
         except Exception as exc:
@@ -106,10 +134,15 @@ async def create_states(
                 messages=[str(exc)],
             )
         finally:
+            lifecycle.finish(item.item_id)
             await _return_worker(pantograph_manager, lease)
 
-    results = await asyncio.gather(*(create_one(item) for item in request.items))
-    return CreateStatesResponse(items=list(results))
+    try:
+        async with limiter.slot():
+            results = await asyncio.gather(*(create_one(item) for item in request.items))
+            return CreateStatesResponse(items=list(results))
+    except ExecRequestRejected as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post(
@@ -121,6 +154,8 @@ async def step_batch(
     request: StepBatchRequest,
     state_store: StateStore = Depends(get_state_store),
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    limiter: ExecRequestLimiter = Depends(get_exec_request_limiter),
     settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> StepBatchResponse:
@@ -131,16 +166,22 @@ async def step_batch(
         max_lean_processes_per_env_profile=(
             settings.max_lean_processes_per_env_profile
         ),
+        max_acquire_timeout_ms=settings.max_acquire_timeout_ms,
+        max_step_timeout_ms=settings.max_step_timeout_ms,
     )
     try:
-        return await execute_step_batch_request(
-            request,
-            state_store=state_store,
-            pantograph_manager=pantograph_manager,
-            config=config,
-        )
+        async with limiter.slot():
+            return await execute_step_batch_request(
+                request,
+                state_store=state_store,
+                pantograph_manager=pantograph_manager,
+                lifecycle=lifecycle,
+                config=config,
+            )
     except StepBatchCapError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ExecRequestRejected as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _timeout_seconds(timeout_ms: int) -> int:
@@ -155,16 +196,127 @@ def _timeout_seconds(timeout_ms: int) -> int:
 async def cleanup(
     request: CleanupRequest,
     state_store: StateStore = Depends(get_state_store),
+    lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
     _api_key: str | None = Depends(require_key),
 ) -> CleanupResponse:
     deleted_items: list[CleanupResult] = []
     for item_id in request.item_ids:
-        stats = state_store.delete_by_item_id(item_id)
+        decision = lifecycle.cleanup_decision(item_id)
+        if not decision.should_delete:
+            deleted_items.append(
+                CleanupResult(
+                    item_id=item_id,
+                    status="deferred",
+                    reason="in_flight",
+                    in_flight=decision.snapshot.in_flight,
+                    deleted_states=0,
+                    deleted_bytes=0,
+                )
+            )
+            continue
+
+        delete_decision = state_store.delete_by_item_id_all_or_none(item_id)
+        if not delete_decision.deleted:
+            deleted_items.append(
+                CleanupResult(
+                    item_id=item_id,
+                    status="deferred",
+                    reason="pinned",
+                    pinned_states=delete_decision.pinned_states,
+                    deleted_states=0,
+                    deleted_bytes=0,
+                )
+            )
+            continue
+
+        lifecycle.mark_cleaned(item_id)
         deleted_items.append(
             CleanupResult(
                 item_id=item_id,
-                deleted_states=stats.deleted_states,
-                deleted_bytes=stats.deleted_bytes,
+                status="deleted",
+                deleted_states=delete_decision.stats.deleted_states,
+                deleted_bytes=delete_decision.stats.deleted_bytes,
             )
         )
     return CleanupResponse(deleted_items=deleted_items)
+
+
+@router.post(
+    "/cancel",
+    response_model=CancelResponse,
+    response_model_exclude_none=True,
+)
+async def cancel(
+    request: CancelRequest,
+    lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    _api_key: str | None = Depends(require_key),
+) -> CancelResponse:
+    return CancelResponse(
+        items=[
+            CancelResult(
+                item_id=item_id,
+                status=cast(CancelStatus, (snapshot := lifecycle.cancel(item_id)).status),
+                in_flight=snapshot.in_flight,
+            )
+            for item_id in request.item_ids
+        ]
+    )
+
+
+@router.get(
+    "/limits",
+    response_model=ExecLimitsResponse,
+)
+async def limits(
+    settings: Settings = Depends(get_settings),
+    _api_key: str | None = Depends(require_key),
+) -> ExecLimitsResponse:
+    return ExecLimitsResponse(
+        max_items_per_step_batch=settings.max_items_per_step_batch,
+        max_tactics_per_step_item=settings.max_tactics_per_step_item,
+        max_attempts_per_step_batch=settings.max_attempts_per_step_batch,
+        max_create_items_per_request=settings.max_create_items_per_request,
+        max_pantograph_workers=settings.max_pantograph_workers,
+        max_lean_processes_per_env_profile=settings.max_lean_processes_per_env_profile,
+        max_in_flight_exec_requests=settings.max_in_flight_exec_requests,
+        max_queued_exec_requests=settings.max_queued_exec_requests,
+        max_acquire_timeout_ms=settings.max_acquire_timeout_ms,
+        max_step_timeout_ms=settings.max_step_timeout_ms,
+        recommended_items_per_step_batch=settings.recommended_items_per_step_batch,
+        recommended_in_flight_step_batches=(
+            settings.recommended_in_flight_step_batches
+        ),
+        same_item_id_pipelining=False,
+        cleanup_policy="defer_while_in_flight",
+    )
+
+
+def _validate_create_request(
+    request: CreateStatesRequest,
+    settings: Settings,
+) -> None:
+    if len(request.items) > settings.max_create_items_per_request:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "create_states item count exceeds "
+                f"max_create_items_per_request={settings.max_create_items_per_request}"
+            ),
+        )
+    for item in request.items:
+        if item.acquire_timeout_ms > settings.max_acquire_timeout_ms:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "create_states acquire timeout exceeds "
+                    f"max_acquire_timeout_ms={settings.max_acquire_timeout_ms}"
+                ),
+            )
+        if item.step_timeout_ms > settings.max_step_timeout_ms:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "create_states step timeout exceeds "
+                    f"max_step_timeout_ms={settings.max_step_timeout_ms}"
+                ),
+            )

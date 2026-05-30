@@ -4,10 +4,19 @@ from typing import Any
 
 from .async_client import AsyncKiminaClient
 from .exec_env import AsyncLeanExecBatcher, AsyncLeanExecEnv
+from .exec_journal import (
+    ExecMicrobatchJournal,
+    ExecMicrobatchRecord,
+    UncertainMicrobatchError,
+)
 from .exec_models import (
+    ExecCancelRequest,
+    ExecCancelResponse,
+    ExecCancelResult,
     ExecCleanupRequest,
     ExecCleanupResponse,
     ExecCleanupResult,
+    ExecLimitsResponse,
     ExecCreateStateItem,
     ExecCreateStatesRequest,
     ExecCreateStatesResponse,
@@ -62,10 +71,16 @@ __all__ = [
     "ExecCleanupRequest",
     "ExecCleanupResponse",
     "ExecCleanupResult",
+    "ExecCancelRequest",
+    "ExecCancelResponse",
+    "ExecCancelResult",
     "ExecCreateStateItem",
     "ExecCreateStatesRequest",
     "ExecCreateStatesResponse",
     "ExecCreateStatesResult",
+    "ExecLimitsResponse",
+    "ExecMicrobatchJournal",
+    "ExecMicrobatchRecord",
     "ExecStateInfo",
     "ExecStatus",
     "ExecStepBatchItem",
@@ -79,6 +94,7 @@ __all__ = [
     "Snippet",
     "SnippetAnalysis",
     "SnippetStatus",
+    "UncertainMicrobatchError",
     "VerifyRequestBody",
     "VerifyResponse",
 ]

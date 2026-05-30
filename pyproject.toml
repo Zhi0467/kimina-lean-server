@@ -45,7 +45,7 @@ pantograph = { git = "https://github.com/stanford-centaur/PyPantograph", rev = "
 
 [tool.pytest.ini_options]
 addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match' -x --ignore=./tsts_old"
-norecursedirs = ["tsts_old"]
+norecursedirs = ["tsts_old", ".claude"]
 log_cli_level = "INFO"
 markers = [
     "perfs: performance tests that are not run by default",

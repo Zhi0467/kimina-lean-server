@@ -6,13 +6,18 @@ from pydantic import ValidationError
 import pytest
 
 from server.schemas_exec import (
+    CancelRequest,
+    CancelResponse,
+    CancelResult,
     CleanupRequest,
     CleanupResponse,
     CleanupResult,
     CreateStatesRequest,
     CreateStatesResponse,
     CreateStatesResult,
+    ExecLimitsResponse,
     StateInfo,
+    StepBatchItem,
     StepBatchRequest,
     StepBatchResponse,
     StepBatchResult,
@@ -54,12 +59,33 @@ def test_step_batch_request_validates_items() -> None:
         )
 
 
+def test_timeout_ms_alias_populates_split_timeouts() -> None:
+    item = StepBatchItem(
+        node_id="n0",
+        state_token="st_parent",
+        tactics=["simp"],
+        timeout_ms=1234,
+    )
+
+    assert item.acquire_timeout_ms == 1234
+    assert item.step_timeout_ms == 1234
+    assert "timeout_ms" not in item.model_dump()
+
+
 def test_cleanup_request_validates_item_ids() -> None:
     with pytest.raises(ValidationError):
         CleanupRequest(item_ids=[])
 
     with pytest.raises(ValidationError):
         CleanupRequest(item_ids=["theorem_42:a0", "theorem_42:a0"])
+
+
+def test_cancel_request_validates_item_ids() -> None:
+    with pytest.raises(ValidationError):
+        CancelRequest(item_ids=[])
+
+    with pytest.raises(ValidationError):
+        CancelRequest(item_ids=["theorem_42:a0", "theorem_42:a0"])
 
 
 def test_response_models_capture_stable_contract() -> None:
@@ -85,6 +111,8 @@ def test_response_models_capture_stable_contract() -> None:
                 node_id="theorem_42:a0:n0",
                 results=[
                     StepResult(tactic="simp", status="complete"),
+                    StepResult(tactic="busy", status="overloaded"),
+                    StepResult(tactic="skip", status="cancelled"),
                     StepResult(
                         tactic="rw [Nat.add_comm]",
                         status="open",
@@ -95,7 +123,28 @@ def test_response_models_capture_stable_contract() -> None:
             )
         ]
     )
-    assert step_response.items[0].results[1].state_token == "st_child"
+    assert step_response.items[0].results[3].state_token == "st_child"
+
+    cancel_response = CancelResponse(
+        items=[CancelResult(item_id="theorem_42:a0", status="drained")]
+    )
+    assert cancel_response.items[0].status == "drained"
+
+    limits_response = ExecLimitsResponse(
+        max_items_per_step_batch=1024,
+        max_tactics_per_step_item=64,
+        max_attempts_per_step_batch=8192,
+        max_create_items_per_request=1024,
+        max_pantograph_workers=4,
+        max_lean_processes_per_env_profile=4,
+        max_in_flight_exec_requests=-1,
+        max_queued_exec_requests=-1,
+        max_acquire_timeout_ms=600_000,
+        max_step_timeout_ms=600_000,
+        recommended_items_per_step_batch=16,
+        recommended_in_flight_step_batches=4,
+    )
+    assert not limits_response.same_item_id_pipelining
 
 
 def _schema_test_app() -> FastAPI:
@@ -134,7 +183,12 @@ def _schema_test_app() -> FastAPI:
     async def cleanup(request: CleanupRequest) -> CleanupResponse:
         return CleanupResponse(
             deleted_items=[
-                CleanupResult(item_id=item_id, deleted_states=0, deleted_bytes=0)
+                CleanupResult(
+                    item_id=item_id,
+                    status="deleted",
+                    deleted_states=0,
+                    deleted_bytes=0,
+                )
                 for item_id in request.item_ids
             ]
         )
@@ -187,7 +241,15 @@ def test_exec_schemas_round_trip_through_fastapi() -> None:
     )
     assert cleanup_response.status_code == 200
     assert cleanup_response.json()["deleted_items"] == [
-        {"item_id": "theorem_42:a0", "deleted_states": 0, "deleted_bytes": 0}
+        {
+            "item_id": "theorem_42:a0",
+            "status": "deleted",
+            "reason": None,
+            "in_flight": 0,
+            "pinned_states": 0,
+            "deleted_states": 0,
+            "deleted_bytes": 0,
+        }
     ]
 
 

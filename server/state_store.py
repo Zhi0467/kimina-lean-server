@@ -42,6 +42,13 @@ class DeleteStats:
 
 
 @dataclass(frozen=True)
+class DeleteDecision:
+    deleted: bool
+    stats: DeleteStats
+    pinned_states: int = 0
+
+
+@dataclass(frozen=True)
 class StateStoreStats:
     state_count: int
     total_bytes: int
@@ -169,6 +176,24 @@ class StateStore:
     def delete_by_item_id(self, item_id: str) -> DeleteStats:
         tokens = list(self._tokens_by_item_id.get(item_id, set()))
         return self._delete_tokens(tokens)
+
+    def delete_by_item_id_all_or_none(self, item_id: str) -> DeleteDecision:
+        tokens = list(self._tokens_by_item_id.get(item_id, set()))
+        pinned_count = sum(1 for token in tokens if token in self._pinned_tokens)
+        if pinned_count:
+            return DeleteDecision(
+                deleted=False,
+                stats=DeleteStats(deleted_states=0, deleted_bytes=0),
+                pinned_states=pinned_count,
+            )
+        return DeleteDecision(
+            deleted=True,
+            stats=self._delete_tokens(tokens),
+            pinned_states=0,
+        )
+
+    def count_by_item_id(self, item_id: str) -> int:
+        return len(self._tokens_by_item_id.get(item_id, set()))
 
     def gc_expired(self) -> DeleteStats:
         cutoff = self._now() - self.ttl
