@@ -121,6 +121,30 @@ class _BlockingWorkerFactory:
         return self.worker
 
 
+class _DelayedWorkerFactory:
+    def __init__(
+        self,
+        worker: _FakeWorker,
+        *,
+        acquire_started: asyncio.Event,
+        release_acquire: asyncio.Event,
+    ) -> None:
+        self.worker = worker
+        self.acquire_started = acquire_started
+        self.release_acquire = release_acquire
+
+    async def __call__(
+        self,
+        imports: list[str],
+        project_path: str | None,
+        timeout_seconds: int,
+        buffer_limit: int | None,
+    ) -> _FakeWorker:
+        self.acquire_started.set()
+        await self.release_acquire.wait()
+        return self.worker
+
+
 def _config(max_lanes: int) -> StepBatchBackendConfig:
     return StepBatchBackendConfig(
         max_items_per_step_batch=16,
@@ -266,6 +290,62 @@ async def test_step_batch_returns_cancelled_for_cancelled_item(
         "cancelled",
     ]
     assert factory.workers == []
+
+
+async def test_step_batch_cancelled_while_waiting_for_worker_does_not_run_lean(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    acquire_started = asyncio.Event()
+    release_acquire = asyncio.Event()
+    worker = _FakeWorker()
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(
+        max_workers=1,
+        worker_factory=_DelayedWorkerFactory(
+            worker,
+            acquire_started=acquire_started,
+            release_acquire=release_acquire,
+        ),
+    )
+
+    task = asyncio.create_task(
+        execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id="item_0:n0",
+                        state_token=token,
+                        tactics=["simp", "rfl"],
+                        timeout_ms=1000,
+                    )
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    )
+    await acquire_started.wait()
+    lifecycle.cancel("item_0")
+    release_acquire.set()
+    response = await task
+
+    assert [result.status for result in response.items[0].results] == [
+        "cancelled",
+        "cancelled",
+    ]
+    assert worker.step_calls == []
+    await manager.cleanup()
 
 
 async def test_step_batch_reports_acquire_timeout_as_overloaded(

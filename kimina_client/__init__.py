@@ -2,7 +2,7 @@ import logging
 import sys
 from typing import Any
 
-from .async_client import AsyncKiminaClient
+from .async_client import AsyncKiminaClient, ExecRequestOverloadedError
 from .exec_env import AsyncLeanExecBatcher, AsyncLeanExecEnv
 from .exec_journal import (
     ExecMicrobatchJournal,
@@ -93,6 +93,7 @@ __all__ = [
     "ExecLifecycleStats",
     "ExecRequestLimiterStats",
     "ExecObservedMetrics",
+    "ExecRequestOverloadedError",
     "ExecMicrobatchJournal",
     "ExecMicrobatchRecord",
     "ExecStateInfo",

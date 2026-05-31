@@ -38,6 +38,23 @@ def _is_non_idempotent_exec_url(url: str) -> bool:
     return url.endswith("/exec/create_states") or url.endswith("/exec/step_batch")
 
 
+def _is_exec_request_overload(url: str, status_code: int) -> bool:
+    return _is_non_idempotent_exec_url(url) and status_code in {429, 503}
+
+
+class ExecRequestOverloadedError(RuntimeError):
+    """Observed request-level `/exec` backpressure.
+
+    The server rejected the request before admitting it to the exec queue, so the
+    batcher can retry it without duplicating proof-state work.
+    """
+
+    def __init__(self, url: str, status_code: int) -> None:
+        super().__init__(f"exec request overloaded: {url} returned HTTP {status_code}")
+        self.url = url
+        self.status_code = status_code
+
+
 class AsyncKiminaClient(BaseKimina):
     def __init__(
         self,
@@ -190,6 +207,14 @@ class AsyncKiminaClient(BaseKimina):
                 else:
                     raise ValueError(f"Unsupported method: {method}")
                 response.raise_for_status()  # Ensure 2xx, otherwise retry
+            except httpx.HTTPStatusError as e:
+                if _is_exec_request_overload(url, e.response.status_code):
+                    raise ExecRequestOverloadedError(
+                        url,
+                        e.response.status_code,
+                    ) from e
+                logger.error(f"Error posting to {url}: {e}")
+                raise e
             except httpx.HTTPError as e:
                 logger.error(f"Error posting to {url}: {e}")
                 raise e

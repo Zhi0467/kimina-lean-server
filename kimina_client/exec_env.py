@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ._exec_env_utils import single_step_result
-from .async_client import AsyncKiminaClient
+from .async_client import AsyncKiminaClient, ExecRequestOverloadedError
 from .exec_journal import ExecMicrobatchJournal, UncertainMicrobatchError
 from .exec_models import (
     ExecCancelResponse,
@@ -186,6 +186,8 @@ class AsyncLeanExecEnv:
 
 class LeanExecEnvProtocol(Protocol):
     timeout_ms: int
+    acquire_timeout_ms: int
+    step_timeout_ms: int
 
     async def step_batch(
         self,
@@ -274,8 +276,10 @@ class AsyncLeanExecBatcher:
             node_id=node_id,
             state_token=state_token,
             tactics=tactics,
-            acquire_timeout_ms=acquire_timeout_ms or timeout_ms or self.env.timeout_ms,
-            step_timeout_ms=step_timeout_ms or timeout_ms or self.env.timeout_ms,
+            acquire_timeout_ms=(
+                acquire_timeout_ms or timeout_ms or self.env.acquire_timeout_ms
+            ),
+            step_timeout_ms=step_timeout_ms or timeout_ms or self.env.step_timeout_ms,
         )
         future: asyncio.Future[ExecStepBatchResult] = (
             asyncio.get_running_loop().create_future()
@@ -366,6 +370,22 @@ class AsyncLeanExecBatcher:
                     response = await self.env.step_batch(
                         [queued.item for queued in pending]
                     )
+                except ExecRequestOverloadedError as exc:
+                    if attempt < self.max_overloaded_retries:
+                        pending = [
+                            queued for queued in pending if not queued.future.done()
+                        ]
+                        if not pending:
+                            return
+                        if self.overload_backoff_seconds:
+                            await asyncio.sleep(
+                                self.overload_backoff_seconds * (2**attempt)
+                            )
+                        continue
+                    for queued in pending:
+                        if not queued.future.done():
+                            queued.future.set_exception(exc)
+                    return
                 except Exception as exc:
                     for queued in pending:
                         if not queued.future.done():

@@ -222,6 +222,13 @@ async def _run_process_pool_lane(
                         header=resolved_item.record.header,
                         timeout=resolved_item.item.acquire_timeout_ms / 1000,
                     )
+                    if lifecycle.should_cancel(resolved_item.record.item_id):
+                        slots[resolved_item.index] = _item_status_result(
+                            resolved_item.item,
+                            "cancelled",
+                            f"item {resolved_item.record.item_id!r} is cancelled",
+                        )
+                        continue
                 except NoAvailablePantographWorkerError as exc:
                     slots[resolved_item.index] = _item_status_result(
                         resolved_item.item,

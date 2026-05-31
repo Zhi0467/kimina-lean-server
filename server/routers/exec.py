@@ -110,6 +110,12 @@ async def create_states(
                 header=split_result.header,
                 timeout=item.acquire_timeout_ms / 1000,
             )
+            if lifecycle.should_cancel(item.item_id):
+                return CreateStatesResult(
+                    item_id=item.item_id,
+                    status="cancelled",
+                    messages=[f"item {item.item_id!r} is cancelled"],
+                )
             lease.worker.set_timeout_seconds(_timeout_seconds(item.step_timeout_ms))
             result = await lease.worker.create_states_from_code(
                 split_result.body,

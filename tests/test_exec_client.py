@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from kimina_client import (
@@ -16,6 +17,7 @@ from kimina_client import (
     ExecCreateStatesResponse,
     ExecLimitsResponse,
     ExecMicrobatchJournal,
+    ExecRequestOverloadedError,
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
@@ -49,6 +51,8 @@ class RecordingAsyncKiminaClient(AsyncKiminaClient):
 class FakeLeanExecEnv:
     def __init__(self) -> None:
         self.timeout_ms = 5000
+        self.acquire_timeout_ms = 5000
+        self.step_timeout_ms = 5000
         self.batches: list[list[ExecStepBatchItem]] = []
 
     async def step_batch(
@@ -125,6 +129,17 @@ class OverloadedThenCompleteEnv(FakeLeanExecEnv):
                     for item in items
                 ]
             )
+        return await FakeLeanExecEnv.step_batch(self, items)
+
+
+class RequestOverloadedThenCompleteEnv(FakeLeanExecEnv):
+    async def step_batch(
+        self,
+        items: list[ExecStepBatchItem],
+    ) -> ExecStepBatchResponse:
+        if not self.batches:
+            self.batches.append(items)
+            raise ExecRequestOverloadedError("http://lean.example/exec/step_batch", 503)
         return await FakeLeanExecEnv.step_batch(self, items)
 
 
@@ -334,6 +349,33 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_client_maps_exec_503_to_request_overloaded() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            503,
+            json={"detail": "exec request queue is full"},
+        )
+    )
+    client = AsyncKiminaClient(api_url="http://lean.example", n_retries=1)
+    await client.session.aclose()
+    client.session = httpx.AsyncClient(transport=transport, headers=client.headers)
+
+    with pytest.raises(ExecRequestOverloadedError) as exc_info:
+        await client.exec_step_batch(
+            [
+                ExecStepBatchItem(
+                    node_id="item:n0",
+                    state_token="st_root",
+                    tactics=["simp"],
+                )
+            ]
+        )
+
+    assert exc_info.value.status_code == 503
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_exec_env_step_node_wraps_one_item() -> None:
     client = RecordingAsyncKiminaClient(
         [
@@ -475,6 +517,45 @@ async def test_exec_batcher_retries_observed_overloaded_items() -> None:
         ["item:n0"],
         ["item:n0"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_exec_batcher_retries_request_level_overload() -> None:
+    env = RequestOverloadedThenCompleteEnv()
+    batcher = AsyncLeanExecBatcher(
+        env,
+        max_items=1,
+        max_wait_ms=0,
+        max_in_flight_batches=1,
+        max_overloaded_retries=1,
+        overload_backoff_seconds=0,
+    )
+
+    result = await batcher.submit_step("item:n0", "st_a", ["simp"])
+
+    assert result.results[0].status == "complete"
+    assert [[item.node_id for item in batch] for batch in env.batches] == [
+        ["item:n0"],
+        ["item:n0"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exec_batcher_preserves_split_default_timeouts() -> None:
+    env = FakeLeanExecEnv()
+    env.acquire_timeout_ms = 1234
+    env.step_timeout_ms = 5678
+    batcher = AsyncLeanExecBatcher(
+        env,
+        max_items=1,
+        max_wait_ms=0,
+        max_in_flight_batches=1,
+    )
+
+    await batcher.submit_step("item:n0", "st_a", ["simp"])
+
+    assert env.batches[0][0].acquire_timeout_ms == 1234
+    assert env.batches[0][0].step_timeout_ms == 5678
 
 
 @pytest.mark.asyncio

@@ -81,6 +81,7 @@ class _BlockingCreateWorker:
         self.state_path = state_path
         self.timeout_seconds: int | None = None
         self.gc_calls = 0
+        self.create_calls = 0
 
     def set_timeout_seconds(self, timeout_seconds: int) -> None:
         self.timeout_seconds = timeout_seconds
@@ -91,6 +92,7 @@ class _BlockingCreateWorker:
         *,
         state_dir: Path,
     ) -> PantographCreateResult:
+        self.create_calls += 1
         self.started.set()
         await self.release.wait()
         self.state_path.write_bytes(b"root")
@@ -126,6 +128,30 @@ class _BlockingCreateManager:
 
     async def destroy_worker(self, lease: Any) -> None:
         self.destroyed.append(lease)
+
+
+class _DelayedCreateManager(_BlockingCreateManager):
+    def __init__(
+        self,
+        worker: _BlockingCreateWorker,
+        *,
+        acquire_started: asyncio.Event,
+        release_acquire: asyncio.Event,
+    ) -> None:
+        super().__init__(worker)
+        self.acquire_started = acquire_started
+        self.release_acquire = release_acquire
+
+    async def get_worker(
+        self,
+        *,
+        env_profile: str,
+        header: str,
+        timeout: float,
+    ) -> Any:
+        self.acquire_started.set()
+        await self.release_acquire.wait()
+        return _FakeLease(worker=self.worker)
 
 
 class _RejectingLimiter:
@@ -288,6 +314,60 @@ async def test_create_states_discards_outputs_when_cancelled_before_promotion(
     assert response.items[0].states == []
     assert store.count_by_item_id("theorem_42:a0") == 0
     assert not scratch_path.exists()
+    assert manager.released
+
+
+@pytest.mark.asyncio
+async def test_create_states_cancelled_while_waiting_for_worker_does_not_run_lean(
+    tmp_path: Path,
+) -> None:
+    acquire_started = asyncio.Event()
+    release_acquire = asyncio.Event()
+    worker_started = asyncio.Event()
+    worker_release = asyncio.Event()
+    worker = _BlockingCreateWorker(
+        started=worker_started,
+        release=worker_release,
+        state_path=tmp_path / "store" / "pg_root.bin",
+    )
+    manager = _DelayedCreateManager(
+        worker,
+        acquire_started=acquire_started,
+        release_acquire=release_acquire,
+    )
+    store = StateStore(tmp_path / "store")
+    lifecycle = ItemLifecycleRegistry()
+
+    task = asyncio.create_task(
+        create_states_endpoint(
+            CreateStatesRequest(
+                env_profile="env",
+                items=[
+                    {
+                        "item_id": "theorem_42:a0",
+                        "code": "theorem t : True := by\n  sorry",
+                        "timeout_ms": 1000,
+                    }
+                ],
+            ),
+            state_store=store,
+            pantograph_manager=cast(Any, manager),
+            lifecycle=lifecycle,
+            limiter=ExecRequestLimiter(),
+            metrics=ExecMetrics(),
+            settings=Settings(_env_file=None),
+            _api_key=None,
+        )
+    )
+    await acquire_started.wait()
+    lifecycle.cancel("theorem_42:a0")
+    release_acquire.set()
+    response = await task
+
+    assert response.items[0].status == "cancelled"
+    assert worker.create_calls == 0
+    assert not worker_started.is_set()
+    assert store.count_by_item_id("theorem_42:a0") == 0
     assert manager.released
 
 
