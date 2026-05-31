@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from kimina_client import CheckRequest, Infotree, ReplResponse, Snippet
@@ -26,8 +26,7 @@ def get_manager(request: Request) -> Manager:
 def _shift_line(pos: Pos | None, offset: int) -> None:
     if not pos:
         return
-    line = pos.get("line")
-    pos["line"] = line + offset
+    pos["line"] = pos["line"] + offset
 
 
 def _apply_header_offset(response: ReplResponse, offset: int) -> None:
@@ -168,7 +167,7 @@ async def run_checks(
                 # TODO: Try catch everything DB related
                 if db.connected:
                     await prisma.proof.create(
-                        data={
+                        data=cast(Any, {
                             "id": snippet.id,
                             "code": body,
                             "diagnostics": json.dumps(
@@ -182,7 +181,7 @@ async def run_checks(
                             "repl": {
                                 "connect": {"uuid": repl.uuid.hex},
                             },
-                        }  # type: ignore
+                        })
                     )
                 if not debug:
                     resp.diagnostics = None

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import pantograph
+import pantograph  # pyright: ignore[reportMissingTypeStubs]
 
 from .pantograph_normalize import (
     exception_to_messages,
@@ -14,6 +14,14 @@ from .pantograph_normalize import (
     messages_to_texts,
 )
 from .schemas_exec import ExecStatus
+
+
+def _empty_saved_states() -> list["PantographSavedState"]:
+    return []
+
+
+def _empty_step_results() -> list[str]:
+    return []
 
 
 @dataclass(frozen=True)
@@ -25,8 +33,8 @@ class PantographSavedState:
 @dataclass(frozen=True)
 class PantographCreateResult:
     status: ExecStatus
-    states: list[PantographSavedState] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
+    states: list[PantographSavedState] = field(default_factory=_empty_saved_states)
+    messages: list[str] = field(default_factory=_empty_step_results)
 
 
 @dataclass(frozen=True)
@@ -34,8 +42,8 @@ class PantographStepResult:
     tactic: str
     status: ExecStatus
     state_path: Path | None = None
-    goals: list[str] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
+    goals: list[str] = field(default_factory=_empty_step_results)
+    messages: list[str] = field(default_factory=_empty_step_results)
 
 
 class PantographWorker:

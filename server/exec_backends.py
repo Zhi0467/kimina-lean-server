@@ -9,6 +9,7 @@ from .exec_backend_utils import (
     group_items_by_compatibility,
 )
 from .exec_lifecycle import ItemLifecycleRegistry
+from .exec_state_files import discard_unpromoted_state_paths
 from .pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
@@ -237,11 +238,21 @@ async def _run_process_pool_lane(
                     resolved_item.item.tactics,
                     state_dir=state_store.root_dir,
                 )
-                slots[resolved_item.index] = _step_batch_result_from_worker_results(
-                    resolved_item.item,
-                    worker_results,
-                    state_store=state_store,
-                )
+                if lifecycle.should_cancel(resolved_item.record.item_id):
+                    discard_unpromoted_state_paths(
+                        result.state_path for result in worker_results
+                    )
+                    slots[resolved_item.index] = _item_status_result(
+                        resolved_item.item,
+                        "cancelled",
+                        f"item {resolved_item.record.item_id!r} is cancelled",
+                    )
+                else:
+                    slots[resolved_item.index] = _step_batch_result_from_worker_results(
+                        resolved_item.item,
+                        worker_results,
+                        state_store=state_store,
+                    )
             except Exception as exc:
                 slots[resolved_item.index] = _item_error_result(
                     resolved_item.item,

@@ -26,6 +26,7 @@ from examples.pantograph_benchmark.mining import (
     tokenize_tactics,
 )
 from examples.pantograph_benchmark.replay import ReplayConfig, item_id_for, run_replay
+from examples.pantograph_step_benchmark import _verdict, _workload_analysis
 
 ONE_SHOT = (
     "import Mathlib\n\n"
@@ -144,6 +145,9 @@ def test_build_report_aggregates_throughput_and_status() -> None:
     collector.record_request("/exec/step_batch", 100.0)
     collector.record_request("/exec/step_batch", 200.0)
     collector.record_request("/exec/cleanup", 50.0)
+    collector.record_microbatch("/exec/create_states", item_count=2)
+    collector.record_microbatch("/exec/step_batch", item_count=3, tactic_count=12)
+    collector.record_microbatch("/exec/cleanup", item_count=2)
     collector.record_status("open")
     collector.record_status("complete")
 
@@ -155,13 +159,30 @@ def test_build_report_aggregates_throughput_and_status() -> None:
         rss={"peak_mb": 1234.0},
         state_store_before={"state_count": 0, "total_bytes": 0},
         state_store_after={"state_count": 0, "total_bytes": 0},
+        git_sha="abc123",
+        backend_config={"max_pantograph_workers": 4},
+        workload_shape={"n_proofs": 2},
+        exec_limits={"recommended_items_per_step_batch": 16},
+        exec_stats_before={"state_store": {"state_count": 0}},
+        exec_stats_after={"state_store": {"state_count": 0}},
+        verdict={"success": True},
     )
+    assert report["git_sha"] == "abc123"
+    assert report["phase"] == "phase6"
+    assert report["backend_config"] == {"max_pantograph_workers": 4}
+    assert report["workload_shape"] == {"n_proofs": 2}
     assert report["request_count"] == 4
     assert report["create_items"] == 2
     assert report["items_per_sec"] == 1.5
     assert report["tactics_per_sec"] == 2.0
     assert report["status_counts"] == {"open": 1, "complete": 1}
     assert report["cleanup"] == {"deleted_states": 2, "deleted_bytes": 512}
+    assert report["exec_limits"] == {"recommended_items_per_step_batch": 16}
+    assert report["exec_stats"] == {
+        "before": {"state_store": {"state_count": 0}},
+        "after": {"state_store": {"state_count": 0}},
+    }
+    assert report["verdict"] == {"success": True}
     assert report["latency_by_endpoint_ms"] == {
         "/exec/cleanup": {
             "count": 1,
@@ -185,6 +206,85 @@ def test_build_report_aggregates_throughput_and_status() -> None:
             "max": 200.0,
         },
     }
+    assert report["microbatches"] == {
+        "/exec/cleanup": {
+            "count": 1,
+            "total_items": 2,
+            "total_tactics": 0,
+            "item_count": {"min": 2.0, "p50": 2.0, "max": 2.0},
+            "tactic_count": {"min": 0.0, "p50": 0.0, "max": 0.0},
+            "ids_sample": ["exec_cleanup:0"],
+        },
+        "/exec/create_states": {
+            "count": 1,
+            "total_items": 2,
+            "total_tactics": 0,
+            "item_count": {"min": 2.0, "p50": 2.0, "max": 2.0},
+            "tactic_count": {"min": 0.0, "p50": 0.0, "max": 0.0},
+            "ids_sample": ["exec_create_states:0"],
+        },
+        "/exec/step_batch": {
+            "count": 1,
+            "total_items": 3,
+            "total_tactics": 12,
+            "item_count": {"min": 3.0, "p50": 3.0, "max": 3.0},
+            "tactic_count": {"min": 12.0, "p50": 12.0, "max": 12.0},
+            "ids_sample": ["exec_step_batch:0"],
+        },
+    }
+
+
+def test_workload_analysis_reports_header_groups_lanes_and_microbatches() -> None:
+    workloads = [
+        ProofWorkload(
+            problem_id=f"p{index}",
+            source_hash=f"h{index}",
+            root_code="import Mathlib\n\ntheorem t : True := by sorry",
+            tactic_units=["trivial"],
+        )
+        for index in range(5)
+    ]
+
+    analysis = _workload_analysis(
+        workloads,
+        items_per_request=2,
+        max_lanes_per_group=3,
+    )
+
+    assert analysis["header_groups"]["count"] == 1
+    assert analysis["header_groups"]["sizes"] == [5]
+    assert analysis["planned_step_lanes"] == {
+        "max_lanes_per_group": 3,
+        "lane_count": 3,
+        "items_per_lane": [2, 2, 1],
+    }
+    assert analysis["planned_microbatches"] == {
+        "create": 3,
+        "step_per_depth": 3,
+        "cleanup": 3,
+    }
+
+
+def test_benchmark_verdict_requires_some_lean_work() -> None:
+    collector = MetricsCollector()
+    collector.record_status("overloaded")
+
+    no_work = _verdict(
+        collector,
+        state_store_before={"state_count": 0, "total_bytes": 0},
+        state_store_after={"state_count": 0, "total_bytes": 0},
+    )
+    assert no_work["success"] is False
+    assert no_work["ran_lean_work"] is False
+
+    collector.record_status("open")
+    success = _verdict(
+        collector,
+        state_store_before={"state_count": 0, "total_bytes": 0},
+        state_store_after={"state_count": 0, "total_bytes": 0},
+    )
+    assert success["success"] is True
+    assert success["overloaded"] == 1
 
 
 def test_workload_cache_reuses_matching_metadata(tmp_path: Path) -> None:

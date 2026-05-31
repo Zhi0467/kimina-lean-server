@@ -16,9 +16,12 @@ Status as of 2026-05-30:
 - The in-process `pantograph_task` / `goal.step_batch` work is research only
   and lives off the mainline branch. Do not use it as the production plan unless
   we explicitly reopen that research direction.
-- Deployment target is one node, one FastAPI server process, one in-process
-  `PantographManager`, and multiple bounded Pantograph/Lean worker processes
-  managed by that manager.
+- The serving unit is one FastAPI process with one in-process
+  `PantographManager`, one local `StateStore`, and multiple bounded
+  Pantograph/Lean worker processes managed by that manager. A single machine
+  should run one such serving unit. Multi-machine deployment is allowed only as
+  attempt-level sharding: all calls for a given attempt must keep affinity to
+  the server that owns its local state tokens.
 
 The current production question is no longer "can one Lean process run 16 items
 concurrently?" It is:
@@ -27,6 +30,31 @@ concurrently?" It is:
 Can a bounded pool of old-command Pantograph workers provide correct,
 recoverable, observable, and load-controlled env stepping for RL/search?
 ```
+
+## Definition Of Done
+
+Throughput is characterization data, not the release gate. The backend is done
+when it is robust and safe under the production calling pattern:
+
+- No state corruption: a returned `state_token` always points to the child state
+  created by that tactic attempt for that parent.
+- No state leak on the normal lifecycle path: after search finishes or is
+  abandoned, `cancel`/`cleanup` can bring the attempt's StateStore usage back to
+  zero.
+- No unbounded worker growth: worker count is capped by server configuration and
+  item count only affects queue depth.
+- No unbounded memory growth from item count: memory scales with configured
+  worker count and loaded environments, not with the number of queued or stepped
+  items.
+- Crash resume is microbatch-level: completed microbatches are reused, the
+  in-flight/unknown microbatch is discarded, and no worker-level resume is
+  attempted.
+- Overload is explicit and retryable: pool contention returns `overloaded` or an
+  HTTP overload response, never a tactic `error`.
+- The Python `EnvClient` is the reliable API LeanFoundry/SearchEngine calls; raw
+  `/exec` calls are lower-level and must still obey the same caps/lifecycle
+  contract.
+- Metrics and logs are sufficient to prove the above in E2E and soak runs.
 
 ## Production Shape
 
@@ -44,6 +72,12 @@ Trainer
   -> Pantograph/Lean process
 ```
 
+This repo defines the backend contract. LeanFoundry, SearchEngine, or any other
+caller may wrap it differently, but they must obey these `/exec` semantics:
+unique `item_id` per attempt, no same-`item_id` pipelining, microbatch-level
+resume, item-scoped cancel, and cleanup only after needed search/training records
+have been persisted or handed off.
+
 Responsibilities:
 
 1. Trainer
@@ -55,6 +89,8 @@ Responsibilities:
    - Owns graph nodes, edges, PUCT stats, selected proof paths, rollouts,
      subpaths, and training records.
    - Constructs `item_id`s for backend state ownership.
+   - Uses one unique `item_id` per search attempt. Retrying the same theorem or
+     prefix as a new attempt must use a new `item_id` suffix.
    - Calls cleanup only after it has persisted or handed off all graph/search
      data it needs.
 
@@ -152,8 +188,12 @@ env_call_id = call_abc
   microbatch_63: pending/running/unknown
 ```
 
-If a crash happens near microbatch 63, resume should restart from microbatch 63,
-not from the start of the original call.
+If a crash happens near microbatch 63, resume should reuse persisted responses
+for microbatches 0..62 and restart the logical call at microbatch 63. The old
+in-flight microbatch is discarded: any old `item_id`s from that unknown
+microbatch are abandoned and cleaned up, and retried work is issued under new
+attempt ids. There is no worker-level resume and no exact recovery of a
+Pantograph command that was running during the crash.
 
 ### Server Scheduling
 
@@ -393,6 +433,11 @@ it still has live work. Cancellation is cooperative: no new create/step work
 starts for the `item_id`, and the currently running Pantograph command is allowed
 to finish (v0 does not kill mid-tactic).
 
+Cancel is scoped to an `item_id`, not to a worker lane and not to a Pantograph
+process. A lane is only an internal queue and may contain unrelated proof
+questions. Cancelling one attempt must not kill the lane or discard work for
+other `item_id`s.
+
 Request:
 
 ```json
@@ -419,6 +464,12 @@ Semantics:
 
 - Marks the `item_id` `cancelling`; future `/exec/create_states` and
   `/exec/step_batch` items for it return `cancelled`.
+- If a queued lane item has this `item_id`, it returns `cancelled` without
+  leasing or running Lean.
+- If a Pantograph command for this `item_id` is already running, the worker is
+  allowed to finish the command, but the backend must check cancellation again
+  before registering new child states. A result produced after cancellation is
+  reported as `cancelled` for that item, not committed as usable search state.
 - Repeated cancel is idempotent and returns the current `in_flight`, so the caller
   can poll until it reaches zero (`drained`), then call `/exec/cleanup`.
 - Cancelling a quiescent item (`in_flight == 0`) goes straight to drained.
@@ -426,6 +477,8 @@ Semantics:
   cleanup already ran, so there is nothing left for cancel to do.
 - Cancel abandons the whole attempt. It does not recover a lost response for the
   same attempt; that needs idempotency or persisted microbatch results (Phase 4).
+- Worker/process kill is a health mechanism only: timeout, crash, or broken
+  worker. It is not the normal cancel behavior for a single `item_id`.
 
 ### GET `/exec/limits`
 
@@ -459,6 +512,18 @@ Microbatching.
 Keep Kimina's existing whole-file verification path. Final accepted proofs must
 still pass strict verification with unauthorized axioms and unwanted `sorry`
 usage rejected.
+
+### Pantograph UTF-8 Diagnostic Panic
+
+`docs/pantograph-utf8-panic.md` is the canonical note for the observed Lean
+v4.29.1 `String.Slice.pos!` panic. Current policy is docs-only:
+
+- No serving code mitigation is required for v0.
+- Do not recycle workers or add `panic_seen` response fields unless future runs
+  show bad returned diagnostic text, worker instability, `/verify` panics on real
+  workloads, or an SFT provenance requirement.
+- Treat the panic as a diagnostic-rendering issue, not a proof-state soundness
+  issue, based on the evidence in that doc.
 
 ### Schema Migration Checklist
 
@@ -603,7 +668,9 @@ create/step begins:
   in_flight_count += 1
 
 create/step ends:
-  finish all StateStore writes first (create_child, pin release)
+  if item_id is now cancelling/drained/cleaned -> discard uncommitted worker
+    outputs and return cancelled for that item
+  otherwise finish all StateStore writes first (create_child, pin release)
   in_flight_count -= 1
   if cancelling and in_flight_count == 0 -> drained
 
@@ -656,8 +723,10 @@ Critical invariants:
   begin, the original race still exists.
 - Both `create_states` and `step_batch` register work. A late `create_states`
   can otherwise mint root states after cleanup.
-- The lane loop checks `cancelling` before each item so cooperative drain is
-  bounded by one item's remaining tactics, not the whole lane.
+- The lane loop checks `cancelling` before each item so queued same-attempt items
+  do not run after cancel. It also checks again after a worker command returns
+  and before `StateStore.create_child`; otherwise a cancel that arrives during
+  Lean execution can still commit new children.
 - v0 cancellation does not interrupt `PantographManager.get_worker` while an item
   is waiting for a lease. A waiter may drain only when `acquire_timeout_ms`
   expires unless the manager is later made cancellation-aware.
@@ -698,7 +767,9 @@ scope until we need hard immediate cancellation.
 Tests: `/exec/cleanup` racing an in-flight `/exec/step_batch` returns `deferred`
 while live and deletes to zero once drained; a late create for a cleaned item
 returns `cancelled`; a late step for a cleaned item returns `cancelled` only if
-the parent token still resolves, otherwise `invalid_state_token`.
+the parent token still resolves, otherwise `invalid_state_token`; cancelling an
+item while its current Pantograph command is running does not commit any child
+states after the cancel mark.
 
 ## Crash And Resume Model
 
@@ -716,9 +787,11 @@ Policy:
 - Treat that microbatch as uncertain.
 - If preserving the same attempt, do not blindly replay the uncertain microbatch
   unless idempotency exists.
-- v0 policy is to abandon the affected attempt ids, call `cancel` if the endpoint
-  exists and the server is still alive, then retry `cleanup` until deleted.
-  Reissue work under new attempt ids if search should continue.
+- v0 policy is to abandon the affected attempt ids. If the server process really
+  restarted, nothing is in flight anymore, so resume can retry `cleanup` until
+  deleted. If the server is still alive and the client only lost/abandoned the
+  request, call `cancel` first, then retry `cleanup` until deleted. Reissue work
+  under new attempt ids if search should continue.
 - Do not restart earlier completed microbatches.
 
 ### Case B: Server Finishes Microbatch, Client Does Not Receive Response
@@ -770,7 +843,7 @@ Axis 1 -- transport outcome:
 ```text
 unknown   the HTTP call timed out / dropped, response never observed
           -> the whole item is uncertain: the server may have run it and created
-             children, or nothing. Abandon, cancel if the endpoint exists,
+             children, or nothing. Abandon, cancel if the server is still live,
              then retry cleanup until deleted before retrying under a new attempt.
 observed  the response arrived, so the exact per-result status is known
           -> apply Axis 2.
@@ -849,26 +922,29 @@ state_ttl_seconds
 Current status:
 
 - `/exec/step_batch` has item/tactic/attempt caps in the server exec scheduler.
+- `/exec/create_states` has create-item caps.
 - `PantographManager` bounds worker processes and per-env-profile worker count.
 - `StateStore` has TTL and storage-budget GC.
+- `timeout_ms` is a deprecated alias; request models expose separate
+  `acquire_timeout_ms` and `step_timeout_ms` budgets.
+- Route/backend-level in-flight and queued request limits exist.
+- `/exec/limits` advertises hard caps and batching recommendations.
+- Acquisition contention is represented as `overloaded` or request-level
+  backpressure, not tactic `error`.
 
-Needed:
+Remaining for production evidence:
 
-- Add symmetric caps for `/exec/create_states`.
-- Split `timeout_ms` into separate acquire and step budgets and validate both
-  (see Timeouts).
-- Add route/backend-level in-flight request limits.
-- Return retryable backpressure (`overloaded` per item, or 429/503) for
-  acquisition contention instead of allowing unbounded waiters or reporting
-  per-item `error`.
-- Add `GET /exec/limits` with both hard caps and server recommendations; clients
-  must treat caps as validation limits and recommendations as batching defaults.
-- Add metrics for rejected requests and manager wait time.
+- E2E/benchmark reports consume the stats surface, including rejected-request
+  counters, manager wait/timeout counters, worker-pool stats, lifecycle counts,
+  and StateStore before/after usage.
+- Real Goedel-derived smoke and overload-pressure runs should be kept as release
+  evidence whenever backend scheduling, state promotion, cleanup, or client
+  semantics change.
 
 ## Timeouts
 
-`timeout_ms` on a request item currently drives two unrelated things and should
-be split into separate knobs:
+`timeout_ms` on a request item used to drive two unrelated things and is now a
+deprecated alias. New callers should send separate knobs:
 
 ```text
 acquire_timeout_ms  time the item is willing to wait for a free Lean worker
@@ -924,9 +1000,11 @@ drain bound for an already-started item is its remaining tactic commands times
 is `acquire_timeout_ms`. A later manager change can make worker acquisition
 actively cancellable, but that is not required for the first production slice.
 
-## Deployment Invariant
+## Deployment And State Affinity
 
-Run exactly one FastAPI server process per node for this backend.
+Run exactly one FastAPI server process for each local StateStore/manager
+ownership domain. On a single machine, that means one FastAPI process for this
+backend.
 
 Correct shape:
 
@@ -947,6 +1025,12 @@ unless StateStore metadata, item locks, and worker ownership are moved to a
 shared database/coordinator. With multiple FastAPI processes today, each process
 would have its own in-memory StateStore index and PantographManager. One process
 could create a token that another process cannot resolve from memory.
+
+The repo is otherwise agnostic to the number of machines. Multi-machine serving
+is an external sharding problem: route all calls for one search attempt back to
+the same server instance that created its state tokens. Moving a live attempt
+between machines is out of scope until StateStore and lifecycle ownership become
+shared services.
 
 ## Observability
 
@@ -985,20 +1069,36 @@ Already implemented on `main`:
 - Server exec scheduler for `/exec/step_batch` with cap validation,
   compatibility grouping, bounded lanes, and input-order output.
 - Item lifecycle registry, all-or-nothing public cleanup, deferred cleanup, and
-  cooperative cancel.
+  cooperative cancel for queued/future work.
+- Post-command cancellation hardening for create and step: if cancel arrives
+  while Pantograph is running, unpromoted state files are discarded and the
+  public result is `cancelled`.
 - Split acquire/step timeout schema with deprecated `timeout_ms` compatibility.
 - `overloaded` and `cancelled` exec statuses.
-- `/exec/cancel` and `/exec/limits`.
+- `/exec/cancel`, `/exec/limits`, and `/exec/stats`.
 - Create/step caps, route-level exec request limiter, and retryable overload
   responses.
+- Server-side stats for StateStore count/bytes/pins, lifecycle counts,
+  request-limiter pressure, exec status mix, cleanup/cancel status mix, worker
+  pool utilization, worker RSS/PID, and manager lease wait/timeout counters.
 - Async EnvClient, derived-limit batcher setup, observed-overload retry,
-  same-`item_id` request serialization, and JSON microbatch resume journal.
+  same-`item_id` request serialization, JSON microbatch resume journal, and
+  stats access.
+- Phase 6 benchmark reports that include git SHA, backend configuration,
+  workload shape, header-group summary, planned lane distribution, microbatch
+  summary, server `/exec/limits`, server `/exec/stats` before/after,
+  StateStore before/after usage, RSS sampling, status mix, latency percentiles,
+  cleanup totals, and a pass/fail verdict.
+- Real Goedel-derived 16-item x 8-tactic smoke/pressure runs through
+  `create_states -> step_batch -> cleanup`, with StateStore usage returning to
+  baseline and overload represented as `overloaded`, not tactic `error`.
 
 Known gaps:
 
-- No production stats endpoint for worker/state/load metrics.
-- Whole-system Goedel E2E benchmark and soak have not been run for this final
-  Stage 4 implementation.
+- Extended scale/soak characterization runs (`200 items x 8 tactics` and `1024`
+  items split into 64 microbatches) are still recommended before raising
+  deployment scale or worker counts. They are not expected to require interface
+  changes; they characterize throughput, memory headroom, and workload locality.
 - Server-side idempotency keys are still not implemented. The Stage 4 client
   marks unknown microbatch outcomes as uncertain instead of blindly replaying
   them under the same attempt.
@@ -1063,8 +1163,13 @@ Add:
 Expected success signal:
 
 - The currently running Pantograph command is allowed to finish or time out.
+- If cancel is marked before that command's result is committed, any open child
+  states from that command are discarded and the public result for that item is
+  `cancelled`.
 - Later lane items for that `item_id` return `cancelled` and do not lease workers
   or create states.
+- Unrelated `item_id`s in the same lane/process keep running; cancel never kills
+  the lane as a unit.
 - Repeated cancel is idempotent and reports the current `in_flight` count.
 - Cleanup is deferred while work is live and deletes everything after drain.
 
@@ -1160,8 +1265,12 @@ Expected success signal:
 - Peak worker count never exceeds configured caps.
 - Memory is bounded by worker count, not item count.
 - Throughput and latency are reported with cold-start, header-fragmentation, lane
-  distribution, and manager-wait context.
-- Resume avoids replaying completed microbatches.
+  distribution, and manager-wait context; no throughput number is itself a
+  release gate.
+- Resume avoids replaying completed microbatches and discards only the
+  in-flight/unknown microbatch.
+- Cancel is item-scoped and cleanup is truthful under queued, running, and
+  drained cases.
 - Status mix is explainable: proof `error` means tactic failure, while load
   pressure appears as `overloaded` or request-level backpressure.
 
@@ -1169,10 +1278,15 @@ This is the point where we can claim the backend works as a system.
 
 ## Production Roadmap
 
-The next implementation slice is Phase 5: observability and health. Phases 2A,
-2B, 3, and 4 are implemented and covered by focused tests. Do not call the backend
-production-ready until Phase 5 metrics make benchmark results interpretable and
-Phase 6 completes the real Goedel E2E/soak gate.
+Phase 2A, Phase 2B, Phase 3, Phase 4, Phase 5, and the production-slice Phase 6
+reporting path are implemented and covered by focused tests. The current v0
+completion gate is safety and interface correctness: lifecycle-safe state
+promotion, truthful cleanup, item-scoped cancel, bounded worker/load behavior,
+server-derived client limits, resumable client microbatching, stats access, and
+a real Goedel-derived create/step/cleanup run that returns StateStore usage to
+baseline. Larger `200 x 8` and `1024 split` runs remain scale/soak
+characterization before increasing deployment scale; they should not change the
+LeanFoundry-facing contract.
 
 Phase 2A is done only when:
 
@@ -1199,7 +1313,7 @@ Acceptance:
   process pooling.
 - The object boundaries and cleanup ownership are explicit.
 
-### Phase 2: Cleanup Race Safety
+### Phase 2: Cleanup And Cancel Safety
 
 Status: implemented.
 
@@ -1231,6 +1345,9 @@ Phase 2B -- strongly useful: `POST /exec/cancel` with cooperative draining.
 
 - Mark `cancelling`, stop starting new work, let the current Pantograph command
   finish; the lane loop checks `cancelling` before each item to bound drain.
+- After a Pantograph command returns, check `cancelling` again before promoting
+  open child states into StateStore. If cancel arrived while Lean was running,
+  discard unpromoted child files and return `cancelled` for that item.
 - Repeated cancel is idempotent and reports `in_flight` for polling.
 - Document and test the v0 drain bound: cancel does not interrupt an active
   tactic command or worker acquisition; those drain at `step_timeout_ms` or
@@ -1249,6 +1366,8 @@ Acceptance:
   `cancelled`, not new state.
 - A late `step_batch` for a `cancelling` item returns `cancelled`; after cleanup
   deletes the parent token, a late step returns `invalid_state_token`.
+- A cancel that arrives while one item is already executing does not kill the
+  lane/worker, but also does not publish that item's post-cancel child states.
 - GC is exercised only as a backstop (client never retries cleanup), not as the
   normal path.
 
@@ -1274,6 +1393,9 @@ Phase 2B tests:
   drained at zero, and repeated cancel is idempotent.
 - API test: cancel during a multi-item lane causes later same-`item_id` lane
   items to return `cancelled` while the current item drains normally.
+- Exec fake test: cancel during an already-running item discards open worker
+  outputs before `StateStore.create_child`, returns `cancelled`, and leaves
+  unrelated lane items/processes alive.
 
 ### Phase 3: API Caps And Backpressure
 
@@ -1343,7 +1465,8 @@ status: pending | running | complete | failed | unknown
 
 Acceptance:
 
-- A simulated crash at microbatch 63 of 64 resumes from microbatch 63, not 0.
+- A simulated crash at microbatch 63 of 64 reuses completed microbatches 0..62
+  and treats microbatch 63 as discarded/unknown, not as worker-resumable state.
 - A network failure after a completed step does not silently duplicate useful
   graph work without being marked uncertain.
 - Overloaded items are retried automatically without creating duplicate child
@@ -1360,26 +1483,44 @@ Tests:
   transport failures mark the microbatch uncertain and do not auto-retry
   create/step.
 - Resume test: persisted responses for microbatches 0..62 are reused and only
-  microbatch 63 is rerun or abandoned.
+  microbatch 63 is abandoned or reissued under new attempt ids.
 - Same-item scheduling test: two queued nodes from the same `item_id` are not sent
   in overlapping HTTP requests.
 
 ### Phase 5: Observability And Health
 
+Status: implemented.
+
 - Add stats endpoint or structured metrics covering worker pool, state store,
   request caps, status mix, and memory.
 - Add logs with `item_id`, `node_id`, `env_profile`, `header_hash`, worker PID,
   and request/microbatch ids where available.
+- Include lifecycle metrics: active/cancelling/drained/cleaned item counts,
+  deferred cleanups, cancelled items, and terminal-record sweeps.
+- Include load-control metrics: request limiter in-flight/queued/rejected,
+  manager acquire wait, worker startup time, worker reuse count, and
+  per-env-profile worker counts.
+- Include state metrics: StateStore count/bytes, pinned count, orphan sweep
+  count, TTL deletes, and storage-budget deletes.
 
 Acceptance:
 
-- During a benchmark, we can explain throughput from header grouping, worker
-  cold starts, manager wait, and per-worker utilization.
+- During a benchmark, we can explain wall time and lifecycle outcomes from header
+  grouping, worker cold starts, manager wait, queue pressure, cleanup/cancel
+  events, and per-worker utilization.
+- The stats surface is good enough to prove robust/safe behavior without reading
+  server internals.
 
 ### Phase 6: E2E Benchmark And Soak
 
+Status: production-slice implementation and 16 x 8 Goedel-derived live run
+completed; larger scale/soak runs remain deployment characterization.
+
 - Run real Goedel-derived workload through current `main` only.
 - Benchmark create, step, and cleanup separately and together.
+- Treat throughput as characterization only. There is no required throughput
+  number for completion; the pass/fail criteria are correctness, boundedness,
+  cleanup/cancel safety, and resumability.
 - Use representative shapes:
 
 ```text
@@ -1395,18 +1536,26 @@ Acceptance:
   - cold vs warm worker behavior;
   - header group sizes;
   - worker lane distribution;
+  - manager wait and request-queue time;
   - state-store count/bytes before and after cleanup;
-  - RSS/memory;
+  - RSS/private memory where available;
   - status mix;
-  - cleanup correctness.
+  - cleanup correctness;
+  - cancel correctness;
+  - overload/retry behavior;
+  - GC/orphan sweep behavior.
 
 Acceptance:
 
 - End-to-end run completes without worker leaks or state-store leaks.
 - Cleanup returns state-store usage for the run to zero.
 - Memory is bounded by configured worker count, not by item count.
-- Throughput numbers are reported with header-fragmentation and cold-start
-  context.
+- Throughput numbers are reported with header-fragmentation, cold-start,
+  lane-distribution, and manager-wait context, but they are not the release gate.
+- Cancel is item-scoped: cancelling one `item_id` does not kill unrelated lane
+  work and does not publish post-cancel child states.
+- Microbatch resume reuses completed microbatches and discards only the
+  in-flight/unknown microbatch.
 
 ## Non-Goals For Mainline
 

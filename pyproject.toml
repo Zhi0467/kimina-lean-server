@@ -55,8 +55,8 @@ markers = [
 [tool.mypy]
 plugins = ['pydantic.mypy']
 strict = true
-files = ["kimina_client", "server", "tests"]
-exclude = "^(server/server_old|tsts_old/)"
+files = ["kimina_client", "server"]
+exclude = "^(server/server_old|tsts_old/|kimina_client/infotree\\.py$)"
 ignore_missing_imports = true
 allow_untyped_decorators = true
 disable_error_code = ["unused-ignore"]

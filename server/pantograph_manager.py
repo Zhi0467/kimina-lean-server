@@ -50,6 +50,10 @@ class PantographManagerStats:
     max_workers: int
     max_workers_per_env_profile: int
     worker_startup_timeout_seconds: int
+    lease_requests: int
+    lease_timeouts: int
+    lease_wait_ms_total: float
+    lease_wait_ms_max: float
     free_workers: int
     busy_workers: int
     starting_workers: int
@@ -92,6 +96,10 @@ class PantographManager:
         self._busy: set[PantographWorkerLease] = set()
         self._starting = 0
         self._starting_by_env_profile: dict[str, int] = {}
+        self._lease_requests = 0
+        self._lease_timeouts = 0
+        self._lease_wait_ms_total = 0.0
+        self._lease_wait_ms_max = 0.0
 
     async def get_worker(
         self,
@@ -103,6 +111,8 @@ class PantographManager:
         self._ensure_lock()
         assert self._cond is not None
         header_hash_value = header_hash(header)
+        started_at = time()
+        self._lease_requests += 1
         deadline = time() + timeout
         worker_to_close: PantographWorkerLease | None = None
 
@@ -115,6 +125,7 @@ class PantographManager:
                     ):
                         self._free.pop(i)
                         self._busy.add(lease)
+                        self._record_lease_wait(started_at)
                         return lease
 
                 total = len(self._free) + len(self._busy) + self._starting
@@ -134,12 +145,14 @@ class PantographManager:
 
                 remaining = deadline - time()
                 if remaining <= 0:
+                    self._record_lease_wait(started_at, timed_out=True)
                     raise NoAvailablePantographWorkerError(
                         f"Timed out after {timeout}s"
                     )
                 try:
                     await asyncio.wait_for(self._cond.wait(), timeout=remaining)
                 except TimeoutError:
+                    self._record_lease_wait(started_at, timed_out=True)
                     raise NoAvailablePantographWorkerError(
                         f"Timed out after {timeout}s while waiting"
                     ) from None
@@ -165,12 +178,14 @@ class PantographManager:
             async with self._cond:
                 self._unmark_starting(env_profile)
                 self._cond.notify(1)
+            self._record_lease_wait(started_at)
             raise
 
         async with self._cond:
             self._unmark_starting(env_profile)
             self._busy.add(lease)
             self._cond.notify(1)
+        self._record_lease_wait(started_at)
         return lease
 
     async def release_worker(self, lease: PantographWorkerLease) -> None:
@@ -241,6 +256,13 @@ class PantographManager:
         else:
             self._starting_by_env_profile[env_profile] = count - 1
 
+    def _record_lease_wait(self, started_at: float, *, timed_out: bool = False) -> None:
+        wait_ms = max((time() - started_at) * 1000, 0.0)
+        self._lease_wait_ms_total += wait_ms
+        self._lease_wait_ms_max = max(self._lease_wait_ms_max, wait_ms)
+        if timed_out:
+            self._lease_timeouts += 1
+
     async def destroy_worker(self, lease: PantographWorkerLease) -> None:
         self._ensure_lock()
         assert self._cond is not None
@@ -271,6 +293,10 @@ class PantographManager:
             free = list(self._free)
             busy = list(self._busy)
             starting_by_env = dict(self._starting_by_env_profile)
+            lease_requests = self._lease_requests
+            lease_timeouts = self._lease_timeouts
+            lease_wait_ms_total = self._lease_wait_ms_total
+            lease_wait_ms_max = self._lease_wait_ms_max
             worker_stats = [
                 self._lease_stats(lease, status="free") for lease in free
             ] + [self._lease_stats(lease, status="busy") for lease in busy]
@@ -285,6 +311,10 @@ class PantographManager:
             max_workers=self.max_workers,
             max_workers_per_env_profile=self.max_workers_per_env_profile,
             worker_startup_timeout_seconds=self.worker_startup_timeout_seconds,
+            lease_requests=lease_requests,
+            lease_timeouts=lease_timeouts,
+            lease_wait_ms_total=lease_wait_ms_total,
+            lease_wait_ms_max=lease_wait_ms_max,
             free_workers=len(free),
             busy_workers=len(busy),
             starting_workers=sum(starting_by_env.values()),

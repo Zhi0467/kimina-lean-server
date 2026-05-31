@@ -240,6 +240,11 @@ async def _post(
     collector: MetricsCollector,
 ) -> dict | None:
     headers = {"Authorization": config.api_key} if config.api_key else None
+    collector.record_microbatch(
+        path,
+        item_count=_payload_item_count(path, payload),
+        tactic_count=_payload_tactic_count(path, payload),
+    )
     start = now_ms()
     try:
         response = await client.post(
@@ -258,3 +263,15 @@ async def _post(
 
 def _chunks(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _payload_item_count(path: str, payload: dict) -> int:
+    if path == "/exec/cleanup":
+        return len(payload.get("item_ids", []))
+    return len(payload.get("items", []))
+
+
+def _payload_tactic_count(path: str, payload: dict) -> int:
+    if path != "/exec/step_batch":
+        return 0
+    return sum(len(item.get("tactics", [])) for item in payload.get("items", []))

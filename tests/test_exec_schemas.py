@@ -17,7 +17,14 @@ from server.schemas_exec import (
     CreateStatesResponse,
     CreateStatesResult,
     ExecLimitsResponse,
+    ExecLifecycleStats,
+    ExecObservedMetrics,
+    ExecRequestLimiterStats,
     StateInfo,
+    ExecStateStoreStats,
+    ExecStatsResponse,
+    ExecWorkerPoolStats,
+    ExecWorkerStats,
     StepBatchItem,
     StepBatchRequest,
     StepBatchResponse,
@@ -157,6 +164,57 @@ def test_response_models_capture_stable_contract() -> None:
         recommended_in_flight_step_batches=4,
     )
     assert not limits_response.same_item_id_pipelining
+
+    stats_response = ExecStatsResponse(
+        state_store=ExecStateStoreStats(
+            state_count=2,
+            total_bytes=12,
+            item_count=1,
+            pinned_states=0,
+            pin_refs=0,
+        ),
+        worker_pool=ExecWorkerPoolStats(
+            max_workers=4,
+            max_workers_per_env_profile=2,
+            worker_startup_timeout_seconds=600,
+            lease_requests=2,
+            lease_timeouts=1,
+            lease_wait_ms_total=12.5,
+            lease_wait_ms_max=10.0,
+            free_workers=1,
+            busy_workers=1,
+            starting_workers=0,
+            total_workers=2,
+            workers_by_env_profile={"env": 2},
+            workers=[
+                ExecWorkerStats(
+                    env_profile="env",
+                    header_hash="abc",
+                    status="busy",
+                    use_count=3,
+                    pid=123,
+                    rss_bytes=456,
+                )
+            ],
+        ),
+        lifecycle=ExecLifecycleStats(
+            total_items=1,
+            active_items=1,
+            cancelling_items=0,
+            drained_items=0,
+            cleaned_items=0,
+            in_flight_items=1,
+            total_in_flight=1,
+        ),
+        request_limiter=ExecRequestLimiterStats(
+            max_in_flight=4,
+            max_queued=8,
+            in_flight=1,
+            queued=0,
+        ),
+        metrics=ExecObservedMetrics(exec_status_counts={"open": 1}),
+    )
+    assert stats_response.worker_pool.workers[0].rss_bytes == 456
 
 
 def _schema_test_app() -> FastAPI:

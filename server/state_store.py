@@ -52,6 +52,9 @@ class DeleteDecision:
 class StateStoreStats:
     state_count: int
     total_bytes: int
+    item_count: int
+    pinned_states: int
+    pin_refs: int
 
 
 class StateStore:
@@ -220,6 +223,9 @@ class StateStore:
         return StateStoreStats(
             state_count=len(self._records),
             total_bytes=sum(record.size_bytes for record in self._records.values()),
+            item_count=len(self._tokens_by_item_id),
+            pinned_states=len(self._pinned_tokens),
+            pin_refs=sum(self._pinned_tokens.values()),
         )
 
     def _new_token(self) -> str:

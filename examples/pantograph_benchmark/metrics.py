@@ -18,10 +18,20 @@ class RequestRecord:
 
 
 @dataclass
+class MicrobatchRecord:
+    endpoint: str
+    microbatch_id: str
+    item_count: int
+    tactic_count: int
+
+
+@dataclass
 class MetricsCollector:
     """Accumulates per-request latencies and per-tactic status counts."""
 
     requests: list[RequestRecord] = field(default_factory=list)
+    microbatches: list[MicrobatchRecord] = field(default_factory=list)
+    _microbatch_counts: Counter[str] = field(default_factory=Counter)
     status_counts: Counter[str] = field(default_factory=Counter)
     create_items: int = 0
     created_states: int = 0
@@ -30,6 +40,25 @@ class MetricsCollector:
 
     def record_request(self, endpoint: str, elapsed_ms: float) -> None:
         self.requests.append(RequestRecord(endpoint=endpoint, elapsed_ms=elapsed_ms))
+
+    def record_microbatch(
+        self,
+        endpoint: str,
+        *,
+        item_count: int,
+        tactic_count: int = 0,
+    ) -> None:
+        index = self._microbatch_counts[endpoint]
+        self._microbatch_counts[endpoint] += 1
+        normalized_endpoint = endpoint.strip("/").replace("/", "_")
+        self.microbatches.append(
+            MicrobatchRecord(
+                endpoint=endpoint,
+                microbatch_id=f"{normalized_endpoint}:{index}",
+                item_count=item_count,
+                tactic_count=tactic_count,
+            )
+        )
 
     def record_status(self, status: str) -> None:
         self.status_counts[status] += 1
@@ -130,10 +159,22 @@ def build_report(
     rss: dict[str, float] | None,
     state_store_before: dict[str, int],
     state_store_after: dict[str, int],
+    git_sha: str | None = None,
+    phase: str = "phase6",
+    backend_config: dict[str, object] | None = None,
+    workload_shape: dict[str, object] | None = None,
+    exec_limits: dict[str, object] | None = None,
+    exec_stats_before: dict[str, object] | None = None,
+    exec_stats_after: dict[str, object] | None = None,
+    verdict: dict[str, object] | None = None,
 ) -> dict[str, object]:
     latencies = [record.elapsed_ms for record in collector.requests]
     request_count = len(latencies)
     return {
+        "git_sha": git_sha,
+        "phase": phase,
+        "backend_config": backend_config or {},
+        "workload_shape": workload_shape or {},
         "wall_seconds": round(wall_seconds, 3),
         "request_count": request_count,
         "create_items": collector.create_items,
@@ -153,6 +194,7 @@ def build_report(
             "max": round(max(latencies), 1) if latencies else 0.0,
         },
         "latency_by_endpoint_ms": _latency_by_endpoint(collector.requests),
+        "microbatches": _microbatch_summary(collector.microbatches),
         "status_counts": dict(collector.status_counts),
         "cleanup": {
             "deleted_states": cleanup_deleted_states,
@@ -166,6 +208,12 @@ def build_report(
             "before": state_store_before,
             "after": state_store_after,
         },
+        "exec_limits": exec_limits,
+        "exec_stats": {
+            "before": exec_stats_before,
+            "after": exec_stats_after,
+        },
+        "verdict": verdict or {},
     }
 
 
@@ -183,6 +231,46 @@ def _latency_by_endpoint(records: list[RequestRecord]) -> dict[str, dict[str, fl
         }
         for endpoint, values in sorted(grouped.items())
     }
+
+
+def _microbatch_summary(
+    records: list[MicrobatchRecord],
+) -> dict[str, dict[str, object]]:
+    grouped: dict[str, list[MicrobatchRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.endpoint, []).append(record)
+
+    return {
+        endpoint: {
+            "count": len(endpoint_records),
+            "total_items": sum(record.item_count for record in endpoint_records),
+            "total_tactics": sum(record.tactic_count for record in endpoint_records),
+            "item_count": _count_summary(
+                [float(record.item_count) for record in endpoint_records]
+            ),
+            "tactic_count": _count_summary(
+                [float(record.tactic_count) for record in endpoint_records]
+            ),
+            "ids_sample": _sample_ids(
+                [record.microbatch_id for record in endpoint_records]
+            ),
+        }
+        for endpoint, endpoint_records in sorted(grouped.items())
+    }
+
+
+def _count_summary(values: list[float]) -> dict[str, float]:
+    return {
+        "min": round(min(values), 1) if values else 0.0,
+        "p50": round(percentile(values, 50), 1),
+        "max": round(max(values), 1) if values else 0.0,
+    }
+
+
+def _sample_ids(ids: list[str]) -> list[str]:
+    if len(ids) <= 10:
+        return ids
+    return ids[:5] + ids[-5:]
 
 
 def _process_tree_rss_mb(process: psutil.Process) -> float | None:

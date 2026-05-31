@@ -13,7 +13,10 @@ from ..exec_backends import (
     return_worker as _return_worker,
 )
 from ..exec_lifecycle import ItemLifecycleRegistry
+from ..exec_metrics import ExecMetrics
 from ..exec_request_limiter import ExecRequestLimiter, ExecRequestRejected
+from ..exec_state_files import discard_unpromoted_state_paths
+from ..exec_stats import collect_exec_stats
 from ..pantograph_manager import (
     NoAvailablePantographWorkerError,
     PantographManager,
@@ -32,6 +35,7 @@ from ..schemas_exec import (
     CreateStatesResponse,
     CreateStatesResult,
     ExecLimitsResponse,
+    ExecStatsResponse,
     StateInfo,
     StepBatchRequest,
     StepBatchResponse,
@@ -63,6 +67,10 @@ def get_exec_request_limiter(request: Request) -> ExecRequestLimiter:
     return cast(ExecRequestLimiter, request.app.state.exec_request_limiter)
 
 
+def get_exec_metrics(request: Request) -> ExecMetrics:
+    return cast(ExecMetrics, request.app.state.exec_metrics)
+
+
 @router.post(
     "/create_states",
     response_model=CreateStatesResponse,
@@ -74,10 +82,15 @@ async def create_states(
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
     lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
     limiter: ExecRequestLimiter = Depends(get_exec_request_limiter),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
     settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> CreateStatesResponse:
-    _validate_create_request(request, settings)
+    try:
+        _validate_create_request(request, settings)
+    except HTTPException:
+        metrics.record_rejection("create_states.cap")
+        raise
 
     async def create_one(item: CreateStatesItem) -> CreateStatesResult:
         begin = lifecycle.begin(item.item_id)
@@ -102,6 +115,13 @@ async def create_states(
                 split_result.body,
                 state_dir=state_store.root_dir,
             )
+            if lifecycle.should_cancel(item.item_id):
+                discard_unpromoted_state_paths(state.path for state in result.states)
+                return CreateStatesResult(
+                    item_id=item.item_id,
+                    status="cancelled",
+                    messages=[f"item {item.item_id!r} is cancelled"],
+                )
             states = [
                 StateInfo(
                     state_token=state_store.put(
@@ -140,8 +160,12 @@ async def create_states(
     try:
         async with limiter.slot():
             results = await asyncio.gather(*(create_one(item) for item in request.items))
-            return CreateStatesResponse(items=list(results))
+            response = CreateStatesResponse(items=list(results))
+            metrics.record_endpoint("create_states")
+            metrics.record_exec_statuses(item.status for item in response.items)
+            return response
     except ExecRequestRejected as exc:
+        metrics.record_rejection("create_states.request_limiter")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -156,6 +180,7 @@ async def step_batch(
     pantograph_manager: PantographManager = Depends(get_pantograph_manager),
     lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
     limiter: ExecRequestLimiter = Depends(get_exec_request_limiter),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
     settings: Settings = Depends(get_settings),
     _api_key: str | None = Depends(require_key),
 ) -> StepBatchResponse:
@@ -171,16 +196,25 @@ async def step_batch(
     )
     try:
         async with limiter.slot():
-            return await execute_step_batch_request(
+            response = await execute_step_batch_request(
                 request,
                 state_store=state_store,
                 pantograph_manager=pantograph_manager,
                 lifecycle=lifecycle,
                 config=config,
             )
+            metrics.record_endpoint("step_batch")
+            metrics.record_exec_statuses(
+                result.status
+                for item in response.items
+                for result in item.results
+            )
+            return response
     except StepBatchCapError as exc:
+        metrics.record_rejection("step_batch.cap")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ExecRequestRejected as exc:
+        metrics.record_rejection("step_batch.request_limiter")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -197,6 +231,7 @@ async def cleanup(
     request: CleanupRequest,
     state_store: StateStore = Depends(get_state_store),
     lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
     _api_key: str | None = Depends(require_key),
 ) -> CleanupResponse:
     deleted_items: list[CleanupResult] = []
@@ -238,7 +273,10 @@ async def cleanup(
                 deleted_bytes=delete_decision.stats.deleted_bytes,
             )
         )
-    return CleanupResponse(deleted_items=deleted_items)
+    response = CleanupResponse(deleted_items=deleted_items)
+    metrics.record_endpoint("cleanup")
+    metrics.record_cleanup_statuses(item.status for item in response.deleted_items)
+    return response
 
 
 @router.post(
@@ -249,9 +287,10 @@ async def cleanup(
 async def cancel(
     request: CancelRequest,
     lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
     _api_key: str | None = Depends(require_key),
 ) -> CancelResponse:
-    return CancelResponse(
+    response = CancelResponse(
         items=[
             CancelResult(
                 item_id=item_id,
@@ -261,6 +300,9 @@ async def cancel(
             for item_id in request.item_ids
         ]
     )
+    metrics.record_endpoint("cancel")
+    metrics.record_cancel_statuses(item.status for item in response.items)
+    return response
 
 
 @router.get(
@@ -269,8 +311,10 @@ async def cancel(
 )
 async def limits(
     settings: Settings = Depends(get_settings),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
     _api_key: str | None = Depends(require_key),
 ) -> ExecLimitsResponse:
+    metrics.record_endpoint("limits")
     return ExecLimitsResponse(
         max_items_per_step_batch=settings.max_items_per_step_batch,
         max_tactics_per_step_item=settings.max_tactics_per_step_item,
@@ -288,6 +332,28 @@ async def limits(
         ),
         same_item_id_pipelining=False,
         cleanup_policy="defer_while_in_flight",
+    )
+
+
+@router.get(
+    "/stats",
+    response_model=ExecStatsResponse,
+)
+async def stats(
+    state_store: StateStore = Depends(get_state_store),
+    pantograph_manager: PantographManager = Depends(get_pantograph_manager),
+    lifecycle: ItemLifecycleRegistry = Depends(get_exec_lifecycle),
+    limiter: ExecRequestLimiter = Depends(get_exec_request_limiter),
+    metrics: ExecMetrics = Depends(get_exec_metrics),
+    _api_key: str | None = Depends(require_key),
+) -> ExecStatsResponse:
+    metrics.record_endpoint("stats")
+    return await collect_exec_stats(
+        state_store=state_store,
+        pantograph_manager=pantograph_manager,
+        lifecycle=lifecycle,
+        limiter=limiter,
+        metrics=metrics,
     )
 
 

@@ -24,12 +24,14 @@ repos:
       - id: pyright
         stages: [pre-commit]
         args: [--project=pyrightconfig.json]
+        pass_filenames: false
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.1
     hooks:
       - id: mypy
         stages: [pre-commit]
         args: ["--config-file=pyproject.toml", "--cache-dir=.mypy_cache", "--show-error-codes"]
+        pass_filenames: false
         additional_dependencies:
         - "pydantic[mypy]>=2.11.7"
         - "pydantic-settings>=2.10.0"

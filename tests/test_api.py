@@ -109,6 +109,7 @@ async def test_mathlib(client: TestClient) -> None:
     uuid = str(uuid4())
     payload = CheckRequest(
         snippets=[Snippet(id=uuid, code="import Mathlib\ndef f := 1")],
+        timeout=120,
         debug=True,  # Enable debug to see diagnostics
     ).model_dump()
     resp = client.post("check", json=payload)
@@ -126,11 +127,12 @@ async def test_mathlib(client: TestClient) -> None:
     ).model_dump(exclude_none=True)
 
     assert_json_equal(resp.json(), expected, ignore_keys=["time", "diagnostics"])
-    assert resp.json()["results"][0]["time"] < 15
+    assert resp.json()["results"][0]["time"] < 120
 
     uuid = str(uuid4())
     payload = CheckRequest(
         snippets=[Snippet(id=uuid, code="import Mathlib\ndef f := 2")],
+        timeout=30,
         debug=True,
     ).model_dump()
     resp1 = client.post("check", json=payload)

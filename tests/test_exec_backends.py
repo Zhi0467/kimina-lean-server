@@ -7,6 +7,7 @@ from pathlib import Path
 from server.exec_backend_utils import distribute_items_across_lanes
 from server.exec_backends import StepBatchBackendConfig, execute_step_batch_request
 from server.exec_lifecycle import ItemLifecycleRegistry
+from server.exec_metrics import ExecMetrics
 from server.pantograph_manager import PantographManager, header_hash
 from server.pantograph_worker import PantographStepResult
 from server.routers.exec import cleanup as cleanup_endpoint
@@ -308,6 +309,9 @@ async def test_step_batch_reports_acquire_timeout_as_overloaded(
 
     assert response.items[0].results[0].status == "overloaded"
     assert store.count_by_item_id("item_0") == 1
+    stats = await manager.stats()
+    assert stats.lease_timeouts == 1
+    assert stats.lease_requests == 2
 
 
 async def test_cancel_skips_later_items_in_same_lane(tmp_path: Path) -> None:
@@ -356,9 +360,124 @@ async def test_cancel_skips_later_items_in_same_lane(tmp_path: Path) -> None:
     release.set()
     response = await task
 
-    assert response.items[0].results[0].status == "complete"
+    assert response.items[0].results[0].status == "cancelled"
     assert response.items[1].results[0].status == "cancelled"
     assert lifecycle.snapshot("item_0").status == "drained"
+    await manager.cleanup()
+
+
+async def test_cancel_during_running_item_discards_open_child(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    worker = _BlockingWorker(
+        started=started,
+        release=release,
+        result_status="open",
+    )
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(
+        max_workers=1,
+        worker_factory=_BlockingWorkerFactory(worker),
+    )
+
+    task = asyncio.create_task(
+        execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id="item_0:n0",
+                        state_token=token,
+                        tactics=["rw [Nat.add_comm]"],
+                        timeout_ms=1000,
+                    )
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    )
+    await started.wait()
+    assert lifecycle.cancel("item_0").status == "cancelling"
+    release.set()
+    response = await task
+
+    result = response.items[0].results[0]
+    assert result.status == "cancelled"
+    assert result.state_token is None
+    assert store.count_by_item_id("item_0") == 1
+    assert not list((tmp_path / "store").glob("pg_*.bin"))
+    await manager.cleanup()
+
+
+async def test_cancel_during_running_item_does_not_stop_unrelated_lane_work(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    tokens = [
+        store.put(
+            _write_state(tmp_path / f"state_{index}.bin"),
+            item_id=item_id,
+            env_profile="env",
+            header=header,
+            header_hash=header_hash(header),
+        )
+        for index, item_id in enumerate(["item_0", "item_1"])
+    ]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    worker = _BlockingWorker(started=started, release=release)
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(
+        max_workers=1,
+        worker_factory=_BlockingWorkerFactory(worker),
+    )
+
+    task = asyncio.create_task(
+        execute_step_batch_request(
+            StepBatchRequest(
+                items=[
+                    StepBatchItem(
+                        node_id="item_0:n0",
+                        state_token=tokens[0],
+                        tactics=["simp"],
+                        timeout_ms=1000,
+                    ),
+                    StepBatchItem(
+                        node_id="item_1:n0",
+                        state_token=tokens[1],
+                        tactics=["rfl"],
+                        timeout_ms=1000,
+                    ),
+                ]
+            ),
+            state_store=store,
+            pantograph_manager=manager,
+            lifecycle=lifecycle,
+            config=_config(max_lanes=1),
+        )
+    )
+    await started.wait()
+    lifecycle.cancel("item_0")
+    release.set()
+    response = await task
+
+    assert response.items[0].results[0].status == "cancelled"
+    assert response.items[1].results[0].status == "complete"
+    assert [call[1] for call in worker.step_calls] == [["simp"], ["rfl"]]
     await manager.cleanup()
 
 
@@ -411,6 +530,7 @@ async def test_cleanup_defers_while_step_batch_is_creating_child(
         CleanupRequest(item_ids=["item_0"]),
         state_store=store,
         lifecycle=lifecycle,
+        metrics=ExecMetrics(),
         _api_key=None,
     )
 
@@ -430,6 +550,7 @@ async def test_cleanup_defers_while_step_batch_is_creating_child(
         CleanupRequest(item_ids=["item_0"]),
         state_store=store,
         lifecycle=lifecycle,
+        metrics=ExecMetrics(),
         _api_key=None,
     )
 

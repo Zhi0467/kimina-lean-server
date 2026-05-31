@@ -11,6 +11,7 @@ from pydantic.json_schema import GenerateJsonSchema
 from .__version__ import __version__
 from .db import db
 from .exec_lifecycle import ItemLifecycleRegistry
+from .exec_metrics import ExecMetrics
 from .exec_request_limiter import ExecRequestLimiter
 from .logger import setup_logging
 from .manager import Manager
@@ -65,6 +66,7 @@ def create_app(settings: Settings) -> FastAPI:
                 settings.item_lifecycle_terminal_retention_seconds
             )
         )
+        app.state.exec_metrics = ExecMetrics()
         app.state.exec_request_limiter = ExecRequestLimiter(
             max_in_flight=settings.max_in_flight_exec_requests,
             max_queued=settings.max_queued_exec_requests,

@@ -21,6 +21,7 @@ from kimina_client import (
     ExecStepBatchResponse,
     ExecStepBatchResult,
     ExecStepResult,
+    ExecStatsResponse,
     UncertainMicrobatchError,
 )
 
@@ -193,6 +194,52 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                 "recommended_items_per_step_batch": 2,
                 "recommended_in_flight_step_batches": 2,
             },
+            {
+                "state_store": {
+                    "state_count": 0,
+                    "total_bytes": 0,
+                    "item_count": 0,
+                    "pinned_states": 0,
+                    "pin_refs": 0,
+                },
+                "worker_pool": {
+                    "max_workers": 4,
+                    "max_workers_per_env_profile": 4,
+                    "worker_startup_timeout_seconds": 600,
+                    "lease_requests": 0,
+                    "lease_timeouts": 0,
+                    "lease_wait_ms_total": 0.0,
+                    "lease_wait_ms_max": 0.0,
+                    "free_workers": 0,
+                    "busy_workers": 0,
+                    "starting_workers": 0,
+                    "total_workers": 0,
+                    "workers_by_env_profile": {},
+                    "workers": [],
+                },
+                "lifecycle": {
+                    "total_items": 0,
+                    "active_items": 0,
+                    "cancelling_items": 0,
+                    "drained_items": 0,
+                    "cleaned_items": 0,
+                    "in_flight_items": 0,
+                    "total_in_flight": 0,
+                },
+                "request_limiter": {
+                    "max_in_flight": 4,
+                    "max_queued": 4,
+                    "in_flight": 0,
+                    "queued": 0,
+                },
+                "metrics": {
+                    "endpoint_requests": {"stats": 1},
+                    "rejected_requests": {},
+                    "exec_status_counts": {},
+                    "cleanup_status_counts": {},
+                    "cancel_status_counts": {},
+                },
+            },
         ]
     )
 
@@ -219,6 +266,7 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
     cleanup = await client.exec_cleanup(["run_1:thm:attempt_1"])
     cancel = await client.exec_cancel(["run_1:thm:attempt_1"])
     limits = await client.exec_limits()
+    stats = await client.exec_stats()
 
     assert isinstance(create, ExecCreateStatesResponse)
     assert create.items[0].states[0].state_token == "st_root"
@@ -228,6 +276,9 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
     assert isinstance(cancel, ExecCancelResponse)
     assert cancel.items[0].status == "drained"
     assert limits.recommended_items_per_step_batch == 2
+    assert isinstance(stats, ExecStatsResponse)
+    assert stats.request_limiter.max_in_flight == 4
+    assert stats.worker_pool.lease_requests == 0
     assert client.calls == [
         (
             "http://lean.example/exec/create_states",
@@ -271,6 +322,11 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
         ),
         (
             "http://lean.example/exec/limits",
+            None,
+            "GET",
+        ),
+        (
+            "http://lean.example/exec/stats",
             None,
             "GET",
         ),

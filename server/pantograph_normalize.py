@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 
 def goal_state_to_goal_texts(goal_state: Any) -> list[str]:
@@ -23,18 +23,18 @@ def exception_to_messages(exc: BaseException) -> list[str]:
     return payload_to_messages(exc.args)
 
 
-def payload_to_messages(payload: Any) -> list[str]:
+def payload_to_messages(payload: object) -> list[str]:
     if payload is None:
         return []
     if isinstance(payload, str):
         return [payload]
-    if isinstance(payload, dict):
-        return _dict_payload_to_messages(payload)
+    if isinstance(payload, Mapping):
+        return _dict_payload_to_messages(cast(Mapping[object, object], payload))
     if isinstance(payload, Iterable) and not isinstance(payload, (bytes, bytearray)):
         texts: list[str] = []
-        for item in payload:
+        for item in cast(Iterable[object], payload):
             texts.extend(payload_to_messages(item))
-        return texts or [str(payload)]
+        return texts or ["iterable"]
     if hasattr(payload, "data"):
         return [_message_to_text(payload)]
     return [str(payload)]
@@ -55,7 +55,7 @@ def _goal_to_text(goal: Any) -> str:
     return "\n".join(lines)
 
 
-def _dict_payload_to_messages(payload: dict[Any, Any]) -> list[str]:
+def _dict_payload_to_messages(payload: Mapping[object, object]) -> list[str]:
     texts: list[str] = []
     for key in ("desc", "error", "parseError", "message", "data"):
         if key in payload:

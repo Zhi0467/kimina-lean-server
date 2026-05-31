@@ -36,6 +36,17 @@ class LifecycleSnapshot:
     in_flight: int
 
 
+@dataclass(frozen=True)
+class ItemLifecycleStats:
+    total_items: int
+    active_items: int
+    cancelling_items: int
+    drained_items: int
+    cleaned_items: int
+    in_flight_items: int
+    total_in_flight: int
+
+
 @dataclass
 class _LifecycleRecord:
     status: LifecycleStatus
@@ -145,6 +156,31 @@ class ItemLifecycleRegistry:
             "drained",
             "cleaned",
         }
+
+    def stats(self) -> ItemLifecycleStats:
+        self.sweep_terminal()
+        status_counts: dict[LifecycleStatus, int] = {
+            "active": 0,
+            "cancelling": 0,
+            "drained": 0,
+            "cleaned": 0,
+        }
+        in_flight_items = 0
+        total_in_flight = 0
+        for record in self._records.values():
+            status_counts[record.status] += 1
+            if record.in_flight > 0:
+                in_flight_items += 1
+                total_in_flight += record.in_flight
+        return ItemLifecycleStats(
+            total_items=len(self._records),
+            active_items=status_counts["active"],
+            cancelling_items=status_counts["cancelling"],
+            drained_items=status_counts["drained"],
+            cleaned_items=status_counts["cleaned"],
+            in_flight_items=in_flight_items,
+            total_in_flight=total_in_flight,
+        )
 
     def sweep_terminal(self) -> int:
         now = self._now()

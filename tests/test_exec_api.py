@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,11 +10,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.exec_backends import return_worker as _return_worker
-from server.exec_request_limiter import ExecRequestRejected
+from server.exec_request_limiter import ExecRequestLimiter, ExecRequestRejected
 from server.main import create_app
 from server.routers.exec import cleanup as cleanup_endpoint
+from server.routers.exec import create_states as create_states_endpoint
 from server.exec_lifecycle import ItemLifecycleRegistry
-from server.schemas_exec import CleanupRequest
+from server.exec_metrics import ExecMetrics
+from server.pantograph_worker import PantographCreateResult, PantographSavedState
+from server.schemas_exec import CleanupRequest, CreateStatesRequest
 from server.settings import Environment, Settings
 from server.state_store import StateStore
 
@@ -67,7 +71,61 @@ class _FakeWorker:
 
 @dataclass
 class _FakeLease:
-    worker: _FakeWorker
+    worker: Any
+
+
+class _BlockingCreateWorker:
+    def __init__(self, *, started: Any, release: Any, state_path: Path) -> None:
+        self.started = started
+        self.release = release
+        self.state_path = state_path
+        self.timeout_seconds: int | None = None
+        self.gc_calls = 0
+
+    def set_timeout_seconds(self, timeout_seconds: int) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    async def create_states_from_code(
+        self,
+        code: str,
+        *,
+        state_dir: Path,
+    ) -> PantographCreateResult:
+        self.started.set()
+        await self.release.wait()
+        self.state_path.write_bytes(b"root")
+        return PantographCreateResult(
+            status="open",
+            states=[PantographSavedState(path=self.state_path, goals=["⊢ True"])],
+        )
+
+    def is_alive(self) -> bool:
+        return True
+
+    async def agc(self) -> None:
+        self.gc_calls += 1
+
+
+class _BlockingCreateManager:
+    def __init__(self, worker: _BlockingCreateWorker) -> None:
+        self.worker = worker
+        self.released: list[Any] = []
+        self.destroyed: list[Any] = []
+
+    async def get_worker(
+        self,
+        *,
+        env_profile: str,
+        header: str,
+        timeout: float,
+    ) -> Any:
+        return _FakeLease(worker=self.worker)
+
+    async def release_worker(self, lease: Any) -> None:
+        self.released.append(lease)
+
+    async def destroy_worker(self, lease: Any) -> None:
+        self.destroyed.append(lease)
 
 
 class _RejectingLimiter:
@@ -131,6 +189,7 @@ async def test_cleanup_endpoint_deletes_by_item_id_unit(tmp_path: Path) -> None:
         CleanupRequest(item_ids=["theorem_42:a0"]),
         state_store=store,
         lifecycle=ItemLifecycleRegistry(),
+        metrics=ExecMetrics(),
         _api_key=None,
     )
 
@@ -161,6 +220,7 @@ async def test_cleanup_endpoint_defers_while_lifecycle_is_active(
         CleanupRequest(item_ids=["theorem_42:a0"]),
         state_store=store,
         lifecycle=lifecycle,
+        metrics=ExecMetrics(),
         _api_key=None,
     )
 
@@ -174,11 +234,61 @@ async def test_cleanup_endpoint_defers_while_lifecycle_is_active(
         CleanupRequest(item_ids=["theorem_42:a0"]),
         state_store=store,
         lifecycle=lifecycle,
+        metrics=ExecMetrics(),
         _api_key=None,
     )
 
     assert deleted.deleted_items[0].status == "deleted"
     assert not state_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_create_states_discards_outputs_when_cancelled_before_promotion(
+    tmp_path: Path,
+) -> None:
+    started: asyncio.Event = asyncio.Event()
+    release: asyncio.Event = asyncio.Event()
+    scratch_path = tmp_path / "store" / "pg_root.bin"
+    worker = _BlockingCreateWorker(
+        started=started,
+        release=release,
+        state_path=scratch_path,
+    )
+    manager = _BlockingCreateManager(worker)
+    store = StateStore(tmp_path / "store")
+    lifecycle = ItemLifecycleRegistry()
+
+    task = asyncio.create_task(
+        create_states_endpoint(
+            CreateStatesRequest(
+                env_profile="env",
+                items=[
+                    {
+                        "item_id": "theorem_42:a0",
+                        "code": "theorem t : True := by\n  sorry",
+                        "timeout_ms": 1000,
+                    }
+                ],
+            ),
+            state_store=store,
+            pantograph_manager=cast(Any, manager),
+            lifecycle=lifecycle,
+            limiter=ExecRequestLimiter(),
+            metrics=ExecMetrics(),
+            settings=Settings(_env_file=None),
+            _api_key=None,
+        )
+    )
+    await started.wait()
+    lifecycle.cancel("theorem_42:a0")
+    release.set()
+    response = await task
+
+    assert response.items[0].status == "cancelled"
+    assert response.items[0].states == []
+    assert store.count_by_item_id("theorem_42:a0") == 0
+    assert not scratch_path.exists()
+    assert manager.released
 
 
 def test_exec_cleanup_route_deletes_state_files_e2e(tmp_path: Path) -> None:
@@ -266,6 +376,15 @@ def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
         payload = limits_response.json()
         assert payload["recommended_items_per_step_batch"] == 16
         assert payload["same_item_id_pipelining"] is False
+
+        stats_response = client.get("/exec/stats")
+        assert stats_response.status_code == 200
+        stats_payload = stats_response.json()
+        assert stats_payload["state_store"]["state_count"] == 0
+        assert stats_payload["worker_pool"]["max_workers"] == 1
+        assert stats_payload["lifecycle"]["drained_items"] == 1
+        assert stats_payload["metrics"]["endpoint_requests"]["cancel"] == 1
+        assert stats_payload["metrics"]["cancel_status_counts"]["drained"] == 1
 
 
 def test_exec_routes_return_503_when_request_limiter_rejects(

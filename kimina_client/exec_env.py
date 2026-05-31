@@ -14,6 +14,7 @@ from .exec_models import (
     ExecCreateStateItem,
     ExecCreateStatesResponse,
     ExecLimitsResponse,
+    ExecStatsResponse,
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
@@ -117,6 +118,9 @@ class AsyncLeanExecEnv:
 
     async def limits(self) -> ExecLimitsResponse:
         return await self.client.exec_limits()
+
+    async def stats(self) -> ExecStatsResponse:
+        return await self.client.exec_stats()
 
     async def step_batch_resumable(
         self,

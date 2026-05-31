@@ -23,6 +23,7 @@ from .exec_models import (
     ExecCreateStatesRequest,
     ExecCreateStatesResponse,
     ExecLimitsResponse,
+    ExecStatsResponse,
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
@@ -171,6 +172,11 @@ class AsyncKiminaClient(BaseKimina):
         url = self.build_url("/exec/limits")
         resp = await self._query(url, method="GET")
         return self.handle(resp, ExecLimitsResponse)
+
+    async def exec_stats(self) -> ExecStatsResponse:
+        url = self.build_url("/exec/stats")
+        resp = await self._query(url, method="GET")
+        return self.handle(resp, ExecStatsResponse)
 
     async def _query(
         self, url: str, payload: dict[str, Any] | None = None, method: str = "POST"

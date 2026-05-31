@@ -169,3 +169,69 @@ class ExecLimitsResponse(BaseModel):
     recommended_in_flight_step_batches: int
     same_item_id_pipelining: bool = False
     cleanup_policy: str = "defer_while_in_flight"
+
+
+class ExecWorkerStats(BaseModel):
+    env_profile: str
+    header_hash: str
+    status: str
+    use_count: int
+    pid: int | None = None
+    rss_bytes: int | None = None
+
+
+class ExecWorkerPoolStats(BaseModel):
+    max_workers: int
+    max_workers_per_env_profile: int
+    worker_startup_timeout_seconds: int
+    lease_requests: int
+    lease_timeouts: int
+    lease_wait_ms_total: float
+    lease_wait_ms_max: float
+    free_workers: int
+    busy_workers: int
+    starting_workers: int
+    total_workers: int
+    workers_by_env_profile: dict[str, int] = Field(default_factory=dict[str, int])
+    workers: list[ExecWorkerStats] = Field(default_factory=list[ExecWorkerStats])
+
+
+class ExecStateStoreStats(BaseModel):
+    state_count: int
+    total_bytes: int
+    item_count: int
+    pinned_states: int
+    pin_refs: int
+
+
+class ExecLifecycleStats(BaseModel):
+    total_items: int
+    active_items: int
+    cancelling_items: int
+    drained_items: int
+    cleaned_items: int
+    in_flight_items: int
+    total_in_flight: int
+
+
+class ExecRequestLimiterStats(BaseModel):
+    max_in_flight: int
+    max_queued: int
+    in_flight: int
+    queued: int
+
+
+class ExecObservedMetrics(BaseModel):
+    endpoint_requests: dict[str, int] = Field(default_factory=dict[str, int])
+    rejected_requests: dict[str, int] = Field(default_factory=dict[str, int])
+    exec_status_counts: dict[str, int] = Field(default_factory=dict[str, int])
+    cleanup_status_counts: dict[str, int] = Field(default_factory=dict[str, int])
+    cancel_status_counts: dict[str, int] = Field(default_factory=dict[str, int])
+
+
+class ExecStatsResponse(BaseModel):
+    state_store: ExecStateStoreStats
+    worker_pool: ExecWorkerPoolStats
+    lifecycle: ExecLifecycleStats
+    request_limiter: ExecRequestLimiterStats
+    metrics: ExecObservedMetrics

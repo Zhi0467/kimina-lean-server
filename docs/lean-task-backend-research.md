@@ -4,7 +4,7 @@ Date: 2026-05-27
 
 Status as of 2026-05-30: this document is research-only. It is not the
 production backend plan for `main`. The mainline backend direction is the
-bounded old-command Pantograph process pool described in `../backend-end-plan.md`.
+bounded old-command Pantograph process pool described in `backend-end-plan.md`.
 Use this document only when explicitly returning to in-process Lean task /
 `pantograph_task` research.
 
