@@ -227,6 +227,16 @@ async def test_timeout(client: TestClient) -> None:
                 )
             ]
         ).model_dump(exclude_none=True),
+        "v4.29.1": CheckResponse(
+            results=[
+                ReplResponse(
+                    id=uuid,
+                    response=CommandResponse(
+                        env=0,
+                    ),
+                )
+            ]
+        ).model_dump(exclude_none=True),
     }
     assert_json_equal(
         resp.json(),
