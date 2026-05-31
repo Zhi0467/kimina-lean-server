@@ -330,12 +330,15 @@ async def limits(
         max_lean_processes_per_env_profile=settings.max_lean_processes_per_env_profile,
         max_in_flight_exec_requests=settings.max_in_flight_exec_requests,
         max_queued_exec_requests=settings.max_queued_exec_requests,
+        max_state_store_bytes=settings.max_state_store_bytes,
+        allow_unbounded_exec=settings.allow_unbounded_exec,
         max_acquire_timeout_ms=settings.max_acquire_timeout_ms,
         max_step_timeout_ms=settings.max_step_timeout_ms,
         recommended_items_per_step_batch=settings.recommended_items_per_step_batch,
         recommended_in_flight_step_batches=(
             settings.recommended_in_flight_step_batches
         ),
+        single_process=settings.single_process,
         same_item_id_pipelining=False,
         cleanup_policy="defer_while_in_flight",
     )

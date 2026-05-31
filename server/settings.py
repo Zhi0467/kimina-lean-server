@@ -4,8 +4,16 @@ from enum import Enum
 from pathlib import Path
 from typing import cast
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .exec_server_config import (
+    DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS,
+    DEFAULT_MAX_QUEUED_EXEC_REQUESTS,
+    DEFAULT_MAX_STATE_STORE_BYTES,
+    DEFAULT_RECOMMENDED_IN_FLIGHT_STEP_BATCHES,
+    default_exec_worker_count,
+)
 
 
 class Environment(str, Enum):
@@ -14,6 +22,15 @@ class Environment(str, Enum):
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # Repository root directory
+
+
+def _copy_max_pantograph_workers(data: dict[str, object]) -> int:
+    value = data["max_pantograph_workers"]
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value)
+    raise TypeError("max_pantograph_workers must be an int")
 
 
 class Settings(BaseSettings):
@@ -29,25 +46,32 @@ class Settings(BaseSettings):
     repl_path: Path = BASE_DIR / "repl/.lake/build/bin/repl"
     project_dir: Path = BASE_DIR / "mathlib4"
 
-    max_repls: int = max((os.cpu_count() or 1) - 1, 1)
+    max_repls: int = Field(default_factory=default_exec_worker_count)
     max_repl_uses: int = -1
     max_repl_mem: int = 12
     max_wait: int = 60
-    max_pantograph_workers: int = max_repls
+    max_pantograph_workers: int = Field(default_factory=default_exec_worker_count)
     max_pantograph_worker_uses: int = -1
     pantograph_buffer_limit: int = 2_000_000
     pantograph_worker_startup_timeout_seconds: int = 600
-    max_lean_processes_per_env_profile: int = 4
+    max_lean_processes_per_env_profile: int = Field(
+        default_factory=_copy_max_pantograph_workers
+    )
     max_items_per_step_batch: int = 1024
     max_tactics_per_step_item: int = 64
     max_attempts_per_step_batch: int = 8192
     max_create_items_per_request: int = 1024
     max_acquire_timeout_ms: int = 600_000
     max_step_timeout_ms: int = 600_000
-    max_in_flight_exec_requests: int = -1
-    max_queued_exec_requests: int = -1
-    recommended_items_per_step_batch: int = 16
-    recommended_in_flight_step_batches: int = 4
+    max_in_flight_exec_requests: int = DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS
+    max_queued_exec_requests: int = DEFAULT_MAX_QUEUED_EXEC_REQUESTS
+    allow_unbounded_exec: bool = False
+    recommended_items_per_step_batch: int = Field(
+        default_factory=_copy_max_pantograph_workers
+    )
+    recommended_in_flight_step_batches: int = (
+        DEFAULT_RECOMMENDED_IN_FLIGHT_STEP_BATCHES
+    )
     item_lifecycle_terminal_retention_seconds: int = 660
 
     init_repls: dict[str, int] = {}
@@ -55,7 +79,8 @@ class Settings(BaseSettings):
     state_store_dir: Path = BASE_DIR / ".leanfoundry-state"
     state_ttl_seconds: int = 3600
     state_gc_interval_seconds: int = 300
-    max_state_store_bytes: int = -1
+    max_state_store_bytes: int = DEFAULT_MAX_STATE_STORE_BYTES
+    single_process: bool = True
 
     database_url: str | None = None
 

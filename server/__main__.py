@@ -5,8 +5,9 @@ from typing import Any
 import uvicorn
 from loguru import logger
 
-from .main import app
-from .settings import Environment, settings
+from ._exec_server_cli import settings_from_cli_args
+from .main import create_app
+from .settings import Environment
 
 
 class InterceptHandler(logging.Handler):
@@ -31,6 +32,8 @@ if __name__ == "__main__":
         logging.getLogger(name).handlers = []
         logging.getLogger(name).propagate = True
 
+    settings = settings_from_cli_args()
+    app = create_app(settings)
     uvicorn.run(
         app,
         host=settings.host,

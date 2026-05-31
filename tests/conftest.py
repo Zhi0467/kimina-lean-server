@@ -22,9 +22,7 @@ def client(request: FixtureRequest) -> TestClient:
 
     overrides = {**defaults, **getattr(request, "param", {})}
 
-    s = Settings(_env_file=None)
-    for k, v in overrides.items():
-        setattr(s, k, v)
+    s = Settings(_env_file=None, **overrides)
     app = create_app(s)
 
     with TestClient(app, base_url="http://testserver/api") as client:
@@ -44,9 +42,7 @@ def client(request: FixtureRequest) -> TestClient:
 )
 def root_client(request: FixtureRequest) -> TestClient:
     overrides = getattr(request, "param", {})
-    s = Settings(_env_file=None)
-    for k, v in overrides.items():
-        setattr(s, k, v)
+    s = Settings(_env_file=None, **overrides)
     app = create_app(s)
 
     with TestClient(app, base_url="http://testserver") as root_client:

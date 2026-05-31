@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+import kimina_client.exec_server as exec_server_module
 
 from kimina_client import (
     AsyncKiminaClient,
@@ -18,6 +19,7 @@ from kimina_client import (
     ExecLimitsResponse,
     ExecMicrobatchJournal,
     ExecRequestOverloadedError,
+    ExecServerConfig,
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
@@ -85,6 +87,7 @@ class FakeLeanExecEnv:
             max_lean_processes_per_env_profile=4,
             max_in_flight_exec_requests=4,
             max_queued_exec_requests=4,
+            max_state_store_bytes=1024,
             max_acquire_timeout_ms=600_000,
             max_step_timeout_ms=600_000,
             recommended_items_per_step_batch=2,
@@ -141,6 +144,12 @@ class RequestOverloadedThenCompleteEnv(FakeLeanExecEnv):
             self.batches.append(items)
             raise ExecRequestOverloadedError("http://lean.example/exec/step_batch", 503)
         return await FakeLeanExecEnv.step_batch(self, items)
+
+
+class UnboundedLimitsEnv(FakeLeanExecEnv):
+    async def limits(self) -> ExecLimitsResponse:
+        limits = await super().limits()
+        return limits.model_copy(update={"max_queued_exec_requests": -1})
 
 
 class OverlapDetectingEnv(FakeLeanExecEnv):
@@ -204,6 +213,7 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                 "max_lean_processes_per_env_profile": 4,
                 "max_in_flight_exec_requests": 4,
                 "max_queued_exec_requests": 4,
+                "max_state_store_bytes": 1024,
                 "max_acquire_timeout_ms": 600000,
                 "max_step_timeout_ms": 600000,
                 "recommended_items_per_step_batch": 2,
@@ -496,6 +506,72 @@ async def test_exec_batcher_can_be_configured_from_server_limits() -> None:
 
     assert batcher.max_items == 2
     assert batcher.max_wait_ms == 0
+
+
+@pytest.mark.asyncio
+async def test_exec_batcher_refuses_unbounded_server_limits() -> None:
+    env = UnboundedLimitsEnv()
+
+    with pytest.raises(RuntimeError, match="max_queued_exec_requests=-1"):
+        await AsyncLeanExecBatcher.from_server_limits(env)
+
+
+def test_exec_server_config_builds_cli_args() -> None:
+    cfg = ExecServerConfig(
+        host="127.0.0.1",
+        port=8765,
+        workers=3,
+        state_store_dir="/tmp/lean-state",
+    )
+
+    args = cfg.to_cli_args()
+
+    assert args[:6] == [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+        "--workers",
+        "3",
+    ]
+    assert ["--max-lean-processes-per-env-profile", "3"] == [
+        args[6],
+        args[7],
+    ]
+    assert "--state-store-dir" in args
+    assert "/tmp/lean-state" in args
+    assert "--single-process" in args
+
+
+def test_exec_server_config_rejects_unbounded_by_default() -> None:
+    with pytest.raises(ValueError, match="allow_unbounded_exec=True"):
+        ExecServerConfig(max_in_flight_exec_requests=-1)
+
+
+def test_launch_server_invokes_server_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        def __init__(
+            self,
+            command: list[str],
+            *,
+            start_new_session: bool,
+        ) -> None:
+            calls["command"] = command
+            calls["start_new_session"] = start_new_session
+
+    monkeypatch.setattr(exec_server_module.subprocess, "Popen", FakePopen)
+
+    process = exec_server_module.launch_server(
+        ExecServerConfig(workers=2),
+        server_python="/server/.venv/bin/python",
+    )
+
+    assert isinstance(process, FakePopen)
+    assert calls["command"][:3] == ["/server/.venv/bin/python", "-m", "server"]
+    assert "--workers" in calls["command"]
+    assert calls["start_new_session"] is True
 
 
 @pytest.mark.asyncio

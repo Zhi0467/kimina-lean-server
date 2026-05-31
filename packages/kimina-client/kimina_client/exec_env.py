@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Protocol
 
-from ._exec_env_utils import single_step_result
+from ._exec_env_utils import single_step_result, validate_finite_exec_limits
 from .async_client import AsyncKiminaClient, ExecRequestOverloadedError
 from .exec_journal import ExecMicrobatchJournal, UncertainMicrobatchError
 from .exec_models import (
@@ -252,6 +252,7 @@ class AsyncLeanExecBatcher:
         item_id_from_node_id: Callable[[str], str] | None = None,
     ) -> "AsyncLeanExecBatcher":
         limits = await env.limits()
+        validate_finite_exec_limits(limits)
         return cls(
             env,
             max_items=limits.recommended_items_per_step_batch,

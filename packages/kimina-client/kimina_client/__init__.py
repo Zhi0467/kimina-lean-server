@@ -9,6 +9,7 @@ from .exec_journal import (
     ExecMicrobatchRecord,
     UncertainMicrobatchError,
 )
+from .exec_server import ExecServerConfig, launch_server
 from .exec_models import (
     ExecCancelRequest,
     ExecCancelResponse,
@@ -94,6 +95,7 @@ __all__ = [
     "ExecRequestLimiterStats",
     "ExecObservedMetrics",
     "ExecRequestOverloadedError",
+    "ExecServerConfig",
     "ExecMicrobatchJournal",
     "ExecMicrobatchRecord",
     "ExecStateInfo",
@@ -112,6 +114,7 @@ __all__ = [
     "UncertainMicrobatchError",
     "VerifyRequestBody",
     "VerifyResponse",
+    "launch_server",
 ]
 
 from colorama import Fore, Style, init

@@ -158,10 +158,13 @@ def test_response_models_capture_stable_contract() -> None:
         max_lean_processes_per_env_profile=4,
         max_in_flight_exec_requests=-1,
         max_queued_exec_requests=-1,
+        max_state_store_bytes=-1,
+        allow_unbounded_exec=True,
         max_acquire_timeout_ms=600_000,
         max_step_timeout_ms=600_000,
         recommended_items_per_step_batch=16,
         recommended_in_flight_step_batches=4,
+        single_process=False,
     )
     assert not limits_response.same_item_id_pipelining
 

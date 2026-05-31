@@ -163,10 +163,13 @@ class ExecLimitsResponse(BaseModel):
     max_lean_processes_per_env_profile: int
     max_in_flight_exec_requests: int
     max_queued_exec_requests: int
+    max_state_store_bytes: int
+    allow_unbounded_exec: bool = False
     max_acquire_timeout_ms: int
     max_step_timeout_ms: int
     recommended_items_per_step_batch: int
     recommended_in_flight_step_batches: int
+    single_process: bool = True
     same_item_id_pipelining: bool = False
     cleanup_policy: str = "defer_while_in_flight"
 

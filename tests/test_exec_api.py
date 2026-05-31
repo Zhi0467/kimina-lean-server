@@ -28,14 +28,15 @@ def _write_state(path: Path, data: bytes = b"state") -> Path:
 
 
 def _test_client(tmp_path: Path, **overrides: Any) -> TestClient:
-    settings = Settings(_env_file=None)
-    settings.database_url = None
-    settings.environment = Environment.prod
-    settings.init_repls = {}
-    settings.state_store_dir = tmp_path / "state-store"
-    settings.max_pantograph_workers = 1
-    for key, value in overrides.items():
-        setattr(settings, key, value)
+    settings = Settings(
+        _env_file=None,
+        database_url=None,
+        environment=Environment.prod,
+        init_repls={},
+        state_store_dir=tmp_path / "state-store",
+        max_pantograph_workers=1,
+        **overrides,
+    )
     return TestClient(create_app(settings))
 
 
@@ -454,7 +455,14 @@ def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
         limits_response = client.get("/exec/limits")
         assert limits_response.status_code == 200
         payload = limits_response.json()
-        assert payload["recommended_items_per_step_batch"] == 16
+        assert payload["max_pantograph_workers"] == 1
+        assert payload["max_lean_processes_per_env_profile"] == 1
+        assert payload["max_in_flight_exec_requests"] == 8
+        assert payload["max_queued_exec_requests"] == 32
+        assert payload["max_state_store_bytes"] == 16 * 2**30
+        assert payload["recommended_items_per_step_batch"] == 1
+        assert payload["recommended_in_flight_step_batches"] == 8
+        assert payload["single_process"] is True
         assert payload["same_item_id_pipelining"] is False
 
         stats_response = client.get("/exec/stats")
@@ -465,6 +473,46 @@ def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
         assert stats_payload["lifecycle"]["drained_items"] == 1
         assert stats_payload["metrics"]["endpoint_requests"]["cancel"] == 1
         assert stats_payload["metrics"]["cancel_status_counts"]["drained"] == 1
+
+
+def test_exec_app_refuses_unbounded_caps_without_opt_in(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url=None,
+        environment=Environment.prod,
+        init_repls={},
+        state_store_dir=tmp_path / "state-store",
+        max_in_flight_exec_requests=-1,
+    )
+
+    with pytest.raises(ValueError, match="allow_unbounded_exec=True"):
+        with TestClient(create_app(settings)):
+            pass
+
+
+def test_exec_single_process_lock_blocks_second_app(tmp_path: Path) -> None:
+    first = Settings(
+        _env_file=None,
+        database_url=None,
+        environment=Environment.prod,
+        init_repls={},
+        state_store_dir=tmp_path / "state-store",
+    )
+    second = Settings(
+        _env_file=None,
+        database_url=None,
+        environment=Environment.prod,
+        init_repls={},
+        state_store_dir=tmp_path / "state-store",
+    )
+
+    with TestClient(create_app(first)):
+        with pytest.raises(RuntimeError, match="already using state_store_dir"):
+            with TestClient(create_app(second)):
+                pass
+
+    with TestClient(create_app(second)):
+        pass
 
 
 def test_exec_routes_return_503_when_request_limiter_rejects(

@@ -31,10 +31,11 @@ def payload_to_messages(payload: object) -> list[str]:
     if isinstance(payload, Mapping):
         return _dict_payload_to_messages(cast(Mapping[object, object], payload))
     if isinstance(payload, Iterable) and not isinstance(payload, (bytes, bytearray)):
+        payload_text = str(cast(object, payload))
         texts: list[str] = []
         for item in cast(Iterable[object], payload):
             texts.extend(payload_to_messages(item))
-        return texts or [str(payload)]
+        return texts or [payload_text]
     if hasattr(payload, "data"):
         return [_message_to_text(payload)]
     return [str(payload)]
