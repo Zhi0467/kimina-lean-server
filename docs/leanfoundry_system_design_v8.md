@@ -39,7 +39,7 @@ This section is the live record of unresolved design decisions, empirical unknow
 ### Confirmed Design Gaps (Need Implementation Before Use)
 
 **G1 — TheoremSpec.initial_lean_block is missing.**
-The current `TheoremSpec` has no field for a pre-built Lean code block with sorry placeholders. This field is required for any sorry-initialized search: lemma decomposition rollouts (training repo), hand-written proof sketches, and any future subgoal decomposition pattern. Without it, SearchEngine can only initialize from a single theorem statement. Fix: add `initial_lean_block: str | None` to `TheoremSpec` in `lean_agent_sdk`. When set, SearchEngine executes the block through Kimina, extracts all sorry goal states, and initializes MCGS from them as AND-hypergraph roots. Backwards-compatible; when None, behavior is unchanged.
+The current `TheoremSpec` has no field for a pre-built Lean code block with sorry placeholders. This field is required for any sorry-initialized search: lemma decomposition rollouts (training repo), hand-written proof sketches, and any future subgoal decomposition pattern. Without it, SearchEngine can only initialize from a single theorem statement. Fix: add `initial_lean_block: str | None` to LeanFoundry's `TheoremSpec`. When set, SearchEngine executes the block through the EnvBackend client, extracts all sorry goal states, and initializes MCGS from them as AND-hypergraph roots. Backwards-compatible; when None, behavior is unchanged.
 
 **G2 — state_value_labels does not distinguish disproved from censored negative.**
 A state marked DISPROVED via negation pruning is definitively mathematically false — label=0 at full weight. A state searched but not proved is a censored negative — reduced weight because "not found by this policy" is not the same as false. The current schema has one `label` field with a single comment. Fix: add `disproved BOOLEAN DEFAULT FALSE`; update value training to assign full weight to disproved states and reduced weight to censored states.
@@ -68,7 +68,7 @@ For each single-goal state `⊢ P`, a synthetic action should be added to the po
 **R1 — Request-level dispatcher / two-level batching design.**
 Two parallelism levels exist: proof-search level (many theorem/proof-graph searches running simultaneously) and tactic-candidate level (N tactics sampled for one selected proof state). The current backend decision is that the **scheduler unit is the proof-state expansion request**, not an individual tactic. One expansion request contains `state_token + tactics[]` and leases exactly one Lean worker; that worker loads the state once and applies the tactic candidates internally. Many expansion requests from many proof graphs are then batched into one Env Backend `/exec/step_batch` request, matching Kimina's existing "one HTTP request contains many independent items" design. This avoids the bad behavior where 16 tactic candidates from one state become 16 manager jobs and cause the Kimina pool to cold-start 16 identical compatible workers.
 
-Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
+Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. The concrete v0 client boundary is the `kimina-client` package: LeanFoundry's EnvBackend adapter wraps `AsyncLeanExecEnv` and `AsyncLeanExecBatcher.from_server_limits`, so request width and in-flight count come from the backend's `/exec/limits` response. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
 
 **R2 — HER verified multiplier vs candidate multiplier gap.**
 The theoretical HER amplification (10–50× from Aristotle) assumes most proved subtrees survive standalone re-verification through Kimina. In practice, subproofs that reference outer local context will fail. The actual `her_verified_multiplier` is unknown until the first MCTS training runs. If the gap to `her_candidate_multiplier` is large, HER's flywheel contribution is smaller than expected.
@@ -407,7 +407,7 @@ profile. Update only between major training phases.
 
 ---
 
-## 2. Kimina-MCTS
+## 2. Kimina `/exec` Env Backend
 
 ### 2.1 What Kimina Already Has
 
@@ -448,6 +448,13 @@ submitted independently, the first tactic would take the only compatible free
 worker, and the second tactic would see no free match and cold-start another
 identical compatible worker until `max_repls` is reached. That is correct for
 independent `/check` code-check items, but wrong for one proof-state expansion.
+
+The implementation boundary is intentionally narrower than the server internals:
+LeanFoundry depends on the `kimina-client` Python package and talks to a running
+server over HTTP. It does not import `server.settings`, `server.main`,
+`PantographManager`, or backend worker classes. The only place that may mention
+Kimina by name inside LeanFoundry is a small EnvBackend adapter/launcher module;
+the SearchEngine sees an `EnvBackend` interface, not a concrete server.
 
 ### 2.3 State Representation: Opaque Token, Local Tmp File Backing
 
@@ -555,16 +562,24 @@ Kimina config knobs that become first-class training config:
 
 ```yaml
 env_backend:
-  max_workers: ${profiled_worker_pool_size}
-  max_wait_seconds: 30
-  worker_memory_limit_gb: ${profiled_worker_memory_limit}
-  init_workers_by_header:
-    "import Mathlib\nimport Aesop": 2
+  # Passed to kimina_client.ExecServerConfig by the LeanFoundry launcher.
+  workers: ${profiled_worker_pool_size}
+  max_lean_processes_per_env_profile: ${profiled_worker_pool_size}
+  recommended_items_per_step_batch: ${profiled_worker_pool_size}
+  recommended_in_flight_step_batches: 8
+  max_in_flight_exec_requests: 8
+  max_queued_exec_requests: 32
+  max_state_store_bytes: 17179869184
   state_store_dir: "/dev/shm/leanfoundry-state"
+  single_process: true
   state_ttl_seconds: 3600
   pantograph_project_dir: "/workspace/mathlib4"
   pantograph_imports: ["Mathlib"]
 ```
+
+The launch config is app-level configuration. Search code should discover
+request-shaping values from `/exec/limits`; it should not duplicate these
+defaults in the SearchEngine.
 
 ### 2.7 Batch API
 
@@ -575,24 +590,57 @@ The execution API is search-algorithm-agnostic. The search algorithm
 Engine / rollout. Env Backend executes tactic steps and verifies proofs; it
 knows nothing about search structure beyond opaque `node_id` correlation.
 
-**POST /exec/init_batch**
+**GET /exec/limits**
 
-Initializes Pantograph states from theorem statements or sorry blocks.
+Advertises enforced caps and client recommendations. LeanFoundry should call
+this through `AsyncLeanExecBatcher.from_server_limits(env)` instead of hardcoding
+request width or in-flight count. The client refuses unbounded safety caps.
+
+```json
+{
+  "max_pantograph_workers": 8,
+  "max_lean_processes_per_env_profile": 8,
+  "max_in_flight_exec_requests": 8,
+  "max_queued_exec_requests": 32,
+  "max_state_store_bytes": 17179869184,
+  "recommended_items_per_step_batch": 8,
+  "recommended_in_flight_step_batches": 8
+}
+```
+
+**POST /exec/create_states**
+
+Initializes Pantograph states from Lean code containing one or more sorry goals.
 
 ```json
 {
   "env_profile": "lean4.29.1_mathlib_5e932f97",
-  "header": "import Mathlib\nimport Aesop",
   "items": [
     {
-      "item_id": "thm_001",
-      "kind": "goal",
-      "expr": "∀ (n : Nat), n + 0 = n"
-    },
+      "item_id": "thm_001:attempt_0",
+      "code": "import Mathlib\n\ntheorem t (n : Nat) : n + 0 = n := by\n  sorry",
+      "acquire_timeout_ms": 5000,
+      "step_timeout_ms": 5000
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "items": [
     {
-      "item_id": "thm_002",
-      "kind": "sorry_block",
-      "code": "theorem t : P := by\n  sorry"
+      "item_id": "thm_001:attempt_0",
+      "status": "open",
+      "states": [
+        {
+          "state_token": "st_root...",
+          "goals": ["n : Nat\n⊢ n + 0 = n"]
+        }
+      ],
+      "messages": []
     }
   ]
 }
@@ -603,14 +651,13 @@ Initializes Pantograph states from theorem statements or sorry blocks.
 Request:
 ```json
 {
-  "env_profile": "lean4.29.1_mathlib_5e932f97",
-  "header_hash": "a3f9...",
   "items": [
     {
       "node_id": "graph7:n123",
-      "state_token": "state:v1:a3f9:8cb2...",
+      "state_token": "st_root...",
       "tactics": ["simp", "rw [Nat.add_comm]", "nlinarith"],
-      "timeout_ms": 5000
+      "acquire_timeout_ms": 5000,
+      "step_timeout_ms": 5000
     }
   ]
 }
@@ -625,30 +672,28 @@ Response:
       "results": [
         {
           "tactic": "simp",
-          "status": "incomplete",
-          "goals": ["⊢ Q"],
-          "next_state_token": "state:v1:a3f9:91de...",
-          "elapsed_ms": 41,
+          "status": "complete",
+          "state_token": null,
+          "goals": [],
           "messages": []
         },
         {
-          "tactic": "nlinarith",
-          "status": "error",
-          "elapsed_ms": 12,
-          "messages": ["nlinarith failed to find a contradiction"]
+          "tactic": "rw [Nat.add_comm]",
+          "status": "open",
+          "state_token": "st_child...",
+          "goals": ["n : Nat\n⊢ 0 + n = n"],
+          "messages": []
         }
       ]
     }
-  ],
-  "server_metrics": {
-    "header_cache_hit_rate": 0.97,
-    "queue_wait_ms_p50": 3,
-    "queue_wait_ms_p95": 31,
-    "worker_utilization": 0.91,
-    "state_store_bytes": 123456789
-  }
+  ]
 }
 ```
+
+Additional operational endpoints:
+- `POST /exec/cleanup` deletes all states for completed `item_id`s.
+- `POST /exec/cancel` marks `item_id`s for cancellation.
+- `GET /exec/stats` exposes state-store, lifecycle, limiter, and worker stats.
 
 **POST /verify** (unchanged from Kimina)
 
@@ -667,13 +712,13 @@ Response:
 
 ### 2.8 Validation Harness
 
-Before trusting Kimina-MCTS for training, validate it reproduces known
+Before trusting the Kimina `/exec` Env Backend for training, validate it reproduces known
 proof trajectories with correct cache behavior.
 
 For each known proof in LeanDojo:
 
 ```
-1. Initialize root/sorry states through /exec/init_batch
+1. Initialize root/sorry states through /exec/create_states
 2. Replay each known tactic through /exec/step_batch
 3. Compare resulting Pantograph goals to trace goals where trace data exists
 4. Render final proof from collected tactic history
@@ -705,7 +750,10 @@ Validate before any training run.
 
 The search engine is a Python process that orchestrates MCTS. It has no
 Lean knowledge — it only knows about nodes, actions, values, and scores.
-All Lean execution is delegated to Kimina-MCTS.
+All Lean execution is delegated to an EnvBackend client. In the v0
+implementation, that client is a LeanFoundry wrapper around `kimina-client`'s
+`AsyncLeanExecEnv` and `AsyncLeanExecBatcher`; the SearchEngine should not
+import `kimina_client` directly.
 
 ### 3.1 Proof Tree Structure and State Equivalence
 
@@ -1677,7 +1725,7 @@ The full rollout function owns the theorem-search orchestration:
 # training_repo/rollouts/lean_rollout.py
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.utils.async_utils import run
-from lean_agent_sdk import EnvBackendClient
+from leanfoundry.env_backend import make_env_backend
 from proofsearch import SearchConfig, run_search_batch, samples_from_search_results
 from training_repo.policy import SlimePolicyClient
 
@@ -1689,11 +1737,10 @@ async def generate_rollout_async(args, rollout_id, data_source, evaluation=False
     # The Lean statement / theorem metadata lives in Sample.prompt or Sample.metadata.
     theorem_groups = data_source.get_samples(args.rollout_batch_size)
 
-    env = EnvBackendClient(
-        base_url=args.lean_env_backend_url,
-        batch_window_ms=args.lean_env_batch_window_ms,
-        max_items_per_batch=args.lean_env_max_items_per_batch,
-    )
+    # The training repo sees an EnvBackend interface. The current implementation
+    # may wrap kimina_client.AsyncLeanExecEnv internally, but this rollout code
+    # does not import kimina_client and does not know about server internals.
+    env = await make_env_backend(args.env_backend_config)
     policy = SlimePolicyClient(args)  # wraps Slime-owned SGLang router
     search_cfg = SearchConfig.from_args(args)
 
@@ -2408,16 +2455,20 @@ change. The public API exposes only LeanFoundry's own abstractions:
 
 ```
 Correct names in LeanFoundry source:   Incorrect (implementation leak):
-  EnvBackend                             KiminaClient / kimina_url
+  EnvBackend                             KiminaClient / kimina_url / server.Settings
   RLEngine / RLEngineBase                SlimeAdapter (internal only)
   SearchEngine                           ConcreteMCTSEngine / raw_mcts_search
   PolicyClient                           sglang_url
   /exec/step_batch                       /mcts/step_batch
 ```
 
-- `Kimina` appears only in `env_backend/kimina_fork/` — the fork
-  directory. LeanFoundry code that imports from this package uses
-  `EnvBackend`, not `KiminaClient`.
+- `kimina_client` appears only in the EnvBackend adapter/launcher boundary, for
+  example `leanfoundry/env_backend/kimina_backend.py`. Search, rollout, eval,
+  and training code import `EnvBackend`, not `KiminaClient`.
+- LeanFoundry never imports the server package. No `server.settings`,
+  `server.main`, `PantographManager`, or worker classes appear in LeanFoundry.
+  The current server is an app process launched by `python -m server` or by
+  `kimina_client.launch_server`.
 - `SGLang` does not appear in LeanFoundry at all. It is internal to
   Slime and accessed through `PolicyClient` and `RLEngineBase`.
 - `MCTS` does not appear as a class name or endpoint name. The search
@@ -2453,21 +2504,23 @@ infra repo    → never imports training repo
 ### Infrastructure Repo Contents
 
 ```
-kimina_mcts/
-  Fork of Kimina Lean Server
-  /verify endpoint (unchanged from upstream)
-  /exec/init_batch and /exec/step_batch (new: Pantograph state-token mode)
-  Local state store: opaque state_token -> shared tmp Pantograph state file
-  PantographWorker wrapping goal_start/load_sorry/goal_tactic/goal_save/goal_load
-  Scheduler with Kimina-style free/busy pool, exact-header reuse, idle LRU eviction
-  Validation harness
+env_backend/
+  EnvBackend protocol and implementation factory
+  kimina_backend.py: the only adapter that imports kimina_client
+  optional launcher wiring around kimina_client.ExecServerConfig and launch_server
+  no imports from the server package
 
-lean_agent_sdk/
-  Python client for EnvBackend
-  Pydantic models: EnvProfile, TheoremSpec, FactorizedProofState,
-                   StepResult, VerifyResult, Trajectory, EvalAttempt
-  TheoremSpec includes initial_lean_block: str | None (see concern G1)
-  TacticNode tree type for structured trajectory representation (see concern G3)
+kimina-client dependency:
+  Installed from kimina-lean-server/packages/kimina-client by pinned git SHA
+  Provides AsyncKiminaClient, AsyncLeanExecEnv, AsyncLeanExecBatcher,
+  ExecServerConfig, launch_server, and shared /exec Pydantic models
+
+backend app process:
+  Runs from the kimina-lean-server checkout or image via python -m server
+  Exposes /exec/create_states, /exec/step_batch, /exec/cleanup, /exec/cancel,
+  /exec/limits, /exec/stats, and legacy verification/checking endpoints
+  Owns Pantograph workers, StateStore, lifecycle registry, admission limiter,
+  lockfile, worker reuse, timeouts, and resource safety caps
 
 proofsearch/
   MCGS / MCTS (AND/OR UCB, state canonicalization, gated graph merging)
@@ -2491,7 +2544,7 @@ schemas/
   Eval artifact schema
 
 docker/
-  Kimina-MCTS image (infra SHA + env_profile hash in tag)
+  Env Backend image (backend SHA + env_profile hash in tag)
   env_profile build scripts (Lean + Mathlib at pinned commit)
 ```
 
@@ -2541,10 +2594,26 @@ execution, replay validation, search, and eval. The training repo never calls
 Lean directly. All Lean interaction goes through the infra repo's SDK:
 
 ```python
-from lean_agent_sdk import EnvBackendClient
+from leanfoundry.env_backend import EnvBackend
 from proofsearch import MCGSSearch
 from evals import run_eval
 ```
+
+The concrete Kimina adapter is small and isolated:
+
+```python
+# leanfoundry/env_backend/kimina_backend.py
+from kimina_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+
+class KiminaEnvBackend(EnvBackend):
+    async def connect(self) -> None:
+        self._client = AsyncKiminaClient(api_url=self.base_url)
+        self._env = AsyncLeanExecEnv(self._client, env_profile=self.env_profile)
+        self._batcher = await AsyncLeanExecBatcher.from_server_limits(self._env)
+```
+
+All other LeanFoundry modules depend on `EnvBackend`; this adapter is the only
+place that knows the current backend is Kimina-shaped.
 
 ### PolicyClient: The API Boundary
 
@@ -2585,7 +2654,8 @@ The training repo pins the infra repo by exact git SHA:
 # infra.lock (in training repo root)
 infra_repo: github.com/your-org/lean-agent-infra
 infra_git_sha: 9a31c7...
-kimina_mcts_image: ghcr.io/your-org/kimina-mcts:9a31c7-env2f65ba7
+env_backend_image: ghcr.io/your-org/kimina-lean-server:9a31c7-env2f65ba7
+kimina_client_ref: 9a31c7...
 env_profile: lean4.29.1_mathlib_5e932f97
 ```
 
@@ -2600,16 +2670,20 @@ becoming the release story.
 Dev mode:
   Training repo has optional git submodule or sibling checkout at
   third_party/lean-agent-infra.
-  Developers run the infra services from source with uv:
+  The training repo depends on kimina-client from the backend repo's
+  packages/kimina-client subdirectory by pinned SHA.
+  Developers run the backend app from source with uv:
     uv sync --dev
     uv run python -m server
+  Or LeanFoundry's EnvBackend launcher calls:
+    kimina_client.launch_server(ExecServerConfig(...), server_python=...)
   No Python package publish/install step is required for the server during
-  backend development.
+  backend development, and LeanFoundry never imports server modules.
 
 Release mode:
   Server deployment is via Docker image with pinned infra SHA and env_profile.
-  The SDK/client boundary may later be packaged separately, but backend
-  development does not depend on packaging.
+  The `kimina-client` package is pinned by git SHA or tag and is the only
+  Python dependency downstream repos import from this backend repo.
 ```
 
 ---
