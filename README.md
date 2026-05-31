@@ -96,8 +96,11 @@ Or use the client below.
 
 ## Client
 
-In this development checkout, `kimina_client/` is a top-level source
-directory. Use it through `uv run` from the repository root:
+The client lives in its own versioned package, `packages/kimina-client/`
+(distribution name `kimina-client`), wired in as a uv workspace member. From
+this repo it is importable as `kimina_client` via `uv run`; a downstream repo
+depends on it directly, e.g.
+`kimina-client = { git = "<repo>", subdirectory = "packages/kimina-client", tag = "client-vX.Y.Z" }`.
 ```python
 from kimina_client import KiminaClient
 client = KiminaClient() # Defaults to "http://localhost:8000", no API key

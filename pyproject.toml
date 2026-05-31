@@ -23,7 +23,11 @@ dependencies = [
     "colorama>=0.4.6",
     "tabulate>=0.9.0",
     "pantograph",
+    "kimina-client",
 ]
+
+[tool.uv.workspace]
+members = ["packages/kimina-client"]
 
 [tool.uv]
 package = false
@@ -42,6 +46,7 @@ dev-dependencies = [
 
 [tool.uv.sources]
 pantograph = { git = "https://github.com/stanford-centaur/PyPantograph", rev = "ffa7f243824d2762825abddb1e9f6e939ede761f" }
+kimina-client = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match' -x --ignore=./tsts_old"
@@ -55,8 +60,8 @@ markers = [
 [tool.mypy]
 plugins = ['pydantic.mypy']
 strict = true
-files = ["kimina_client", "server"]
-exclude = "^(server/server_old|tsts_old/|kimina_client/infotree\\.py$)"
+files = ["packages/kimina-client/kimina_client", "server"]
+exclude = "^(server/server_old|tsts_old/|packages/kimina-client/kimina_client/infotree\\.py$)"
 ignore_missing_imports = true
 allow_untyped_decorators = true
 disable_error_code = ["unused-ignore"]
