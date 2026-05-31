@@ -34,7 +34,7 @@ def payload_to_messages(payload: object) -> list[str]:
         texts: list[str] = []
         for item in cast(Iterable[object], payload):
             texts.extend(payload_to_messages(item))
-        return texts or ["iterable"]
+        return texts or [str(payload)]
     if hasattr(payload, "data"):
         return [_message_to_text(payload)]
     return [str(payload)]

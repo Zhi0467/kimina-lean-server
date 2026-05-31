@@ -498,7 +498,7 @@ async def test_cancel_during_running_item_discards_open_child(
     assert result.status == "cancelled"
     assert result.state_token is None
     assert store.count_by_item_id("item_0") == 1
-    assert not list((tmp_path / "store").glob("pg_*.bin"))
+    assert not list((tmp_path / "store").glob("child_*.bin"))
     await manager.cleanup()
 
 
