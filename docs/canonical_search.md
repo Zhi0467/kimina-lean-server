@@ -239,6 +239,250 @@ The prior `prior(a)` is the **empirical frequency** of this action in samples fr
 
 LCB and UCB are independent mechanisms. LCB operates at the parent AND-node level — which AND-child to descend into. UCB operates within the selected state — which action to try next from that state.
 
+
+#### One MCGS Iteration, Explicitly
+
+A common confusion is to think that one iteration is "select an action node, expand the action node, select a state node, backpropagate." That is close, but the expansion point is better described as a **frontier state**, not an action. One iteration selects a path through the existing alternating OR/AND structure until it reaches an unexpanded or terminal state; then it expands that state by sampling tactics.
+
+The iteration is:
+
+```text
+1. Start at the root state S0.
+
+2. Selection:
+   while the current state is already expanded and not terminal:
+     at an OR state:
+       choose an action using UCB / PUCT
+     at an AND action:
+       choose one child state using LCB
+     continue downward
+
+3. Expansion:
+   when the traversal reaches an unexpanded frontier state S:
+     sample N tactics from the policy
+     execute those tactics in Lean
+     create action nodes and resulting child state nodes
+
+4. Evaluation:
+   run the value model on the new child states,
+   unless a child is terminal, e.g. no goals = PROVED.
+
+5. Backpropagation:
+   propagate value/status information upward:
+     AND action aggregates over child states
+     OR state aggregates over actions
+
+6. Repeat.
+```
+
+ASCII view of one iteration:
+
+```text
+Before expansion, selection walks down the existing graph:
+
+[S0]
+  |
+  | OR selection: choose action by UCB / PUCT
+  v
+(a1)
+  |
+  | AND selection: choose child state by LCB
+  v
+[S1]
+  |
+  | OR selection again
+  v
+(a2)
+  |
+  | AND selection again
+  v
+[S3]  frontier state
+```
+
+Then the frontier state is expanded:
+
+```text
+[S3]
+ /   \
+(b1) (b2)
+ |     |
+{...} {...}
+```
+
+So the compact version is:
+
+```text
+Each iteration selects an OR/AND/OR/AND path down the existing graph,
+expands the first unexpanded state,
+evaluates the new frontier,
+and backpropagates.
+```
+
+Pseudocode:
+
+```python
+def one_iteration(root):
+    path = []
+    node = root  # starts as an OR/state node
+
+    # 1. Selection
+    while node.is_expanded() and not node.is_terminal():
+        action = select_action_ucb(node)      # OR state -> AND action
+        path.append(action)
+
+        child = select_child_lcb(action)      # AND action -> OR state
+        path.append(child)
+
+        node = child
+
+    # 2. Expansion
+    if not node.is_terminal():
+        sampled_actions = policy.sample_tactics(node)
+
+        new_child_states = []
+        for action in sampled_actions:
+            child_states = lean.step(node, action)
+            node.add_action(action, child_states)
+            new_child_states.extend(child_states)
+
+        values = value_model.estimate(new_child_states)
+    else:
+        values = terminal_value(node)
+
+    # 3. Backpropagation
+    backpropagate(path, values)
+```
+
+The value model is run on **state nodes**. Action values are bookkeeping objects computed from their child states, visits, priors, and backed-up values. UCB / PUCT is deterministic code over the action candidates once the current statistics are fixed.
+
+#### Status Propagation Rules
+
+For search status, use three values rather than a simple Boolean:
+
+```text
+PROVED      = solved
+DISPROVED   = impossible/dead, usually from negation pruning
+OPEN        = unresolved under current budget
+```
+
+The important point is that **OPEN is not false**. A state can be open simply because the current policy and search budget have not solved it yet.
+
+Propagation rules:
+
+```text
+State / OR node:
+
+  PROVED    if ANY outgoing action is PROVED
+  OPEN      if no action is proved, but at least one action is still open
+  DISPROVED only if the state itself is disproved, or every available action is dead
+```
+
+```text
+Action / AND node:
+
+  PROVED    if ALL child states are PROVED
+  DISPROVED if ANY child state is DISPROVED
+  OPEN      otherwise
+```
+
+Equivalently:
+
+```text
+OR node:
+  OR(PROVED, OPEN, DISPROVED) = PROVED
+  OR(OPEN, DISPROVED)         = OPEN
+  OR(DISPROVED, DISPROVED)    = DISPROVED, assuming these are exhaustive/dead options
+
+AND node:
+  AND(PROVED, PROVED)         = PROVED
+  AND(PROVED, OPEN)           = OPEN
+  AND(PROVED, DISPROVED)      = DISPROVED
+  AND(OPEN, OPEN)             = OPEN
+```
+
+Example:
+
+```text
+                     [S0: OR]
+                    /        \
+                (a1: AND)   (a2: AND)
+                /    \       /    \
+          PROVED   OPEN   PROVED  PROVED
+```
+
+Then:
+
+```text
+a1 = AND(PROVED, OPEN)   = OPEN
+a2 = AND(PROVED, PROVED) = PROVED
+S0 = OR(OPEN, PROVED)    = PROVED
+```
+
+So an unresolved leaf does **not** make the parent OR-state false. It only keeps that particular parent AND-action open. The OR-state is proved as soon as some other action fully solves it.
+
+#### Proof Extraction from a Terminated Search Graph
+
+The searched graph is not itself the training trajectory. It contains failed actions, open branches, disproved branches, and redundant alternatives. Once the root is proved, extract a **proof subgraph** by following one successful witness action at each OR node and all required children at each AND node.
+
+```text
+Extraction rule:
+
+  at an OR state: choose one PROVED action
+  at an AND action: include every child state
+```
+
+For example, if search created this:
+
+```text
+                         [S0]
+                 /        |        \
+              (a1)       (a2)      (a3)
+             failed      open      solved
+                        /   \      /    \
+                    [X1]   [X2] [S1]  [S2]
+                                  |      |
+                                (b1)   (c1)
+                                / \      |
+                             [S3][S4]  done
+                              |   |
+                            done done
+```
+
+and `(a3)` is the witness action proving `S0`, extraction keeps only:
+
+```text
+                         [S0]
+                          |
+                        (a3)
+                       /    \
+                    [S1]   [S2]
+                     |       |
+                   (b1)    (c1)
+                  /   \      |
+               [S3] [S4]   done
+                |     |
+              done  done
+```
+
+Pseudocode:
+
+```python
+def extract(state):
+    assert state.status == PROVED
+
+    action = choose_proved_action(state)  # witness action at this OR node
+    node = TacticNode(state=state, tactic=action.tactic, children=[])
+
+    for child_state in action.child_states:  # all AND-children are required
+        if child_state.is_terminal_success():
+            continue
+        node.children.append(extract(child_state))
+
+    return node
+```
+
+This gives the training trajectory as a tree/DAG of tactic steps. Depth-first traversal then yields `(state, tactic)` policy examples, but the tree shape must be preserved for Lean branching syntax and HER extraction.
+
 ---
 
 ### 4. Budget, Termination, and Negation Pruning
