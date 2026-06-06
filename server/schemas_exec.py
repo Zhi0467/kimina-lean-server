@@ -64,6 +64,12 @@ class StepBatchItem(_TimeoutItem):
     node_id: str = Field(min_length=1)
     state_token: str = Field(min_length=1)
     tactics: list[str] = Field(min_length=1)
+    # Optional per-item goal focusing. When ``goal_id`` is set (paired with
+    # ``auto_resume=False``), every tactic in this item is applied to that goal
+    # with its siblings suspended, yielding an independent single-goal subtree.
+    # When unset, behaviour is identical to a legacy whole-state step.
+    goal_id: int | None = Field(default=None, ge=0)
+    auto_resume: bool | None = None
 
 
 class StepBatchRequest(BaseModel):
@@ -97,9 +103,37 @@ class CancelRequest(BaseModel):
         return self
 
 
+class Hypothesis(BaseModel):
+    """One local-context entry of a goal.
+
+    ``value`` is set only for ``let``-bound hypotheses; ``name`` is ``None`` for
+    inaccessible / anonymous binders.
+    """
+
+    type: str
+    name: str | None = None
+    value: str | None = None
+
+
+class GoalInfo(BaseModel):
+    """Structured representation of a single in-scope goal.
+
+    ``target`` + ``hypotheses`` carry the content the search engine keys node
+    identity on; ``sibling_dep`` lists indices of sibling goals this goal shares
+    a metavariable with (empty ⇒ independent, safe to split); ``pretty`` is the
+    flattened rendering for model input / verification.
+    """
+
+    target: str
+    pretty: str = ""
+    hypotheses: list[Hypothesis] = Field(default_factory=list[Hypothesis])
+    name: str | None = None
+    sibling_dep: list[int] = Field(default_factory=list[int])
+
+
 class StateInfo(BaseModel):
     state_token: str = Field(min_length=1)
-    goals: list[str] = Field(default_factory=list[str])
+    goals: list[GoalInfo] = Field(default_factory=list[GoalInfo])
 
 
 class CreateStatesResult(BaseModel):
@@ -117,7 +151,7 @@ class StepResult(BaseModel):
     tactic: str
     status: ExecStatus
     state_token: str | None = None
-    goals: list[str] = Field(default_factory=list[str])
+    goals: list[GoalInfo] = Field(default_factory=list[GoalInfo])
     messages: list[str] = Field(default_factory=list[str])
 
 

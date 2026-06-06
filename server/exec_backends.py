@@ -15,9 +15,12 @@ from .pantograph_manager import (
     PantographManager,
     PantographWorkerLease,
 )
+from .pantograph_goal import PantographGoal
 from .pantograph_worker import PantographStepResult
 from .schemas_exec import (
     ExecStatus,
+    GoalInfo,
+    Hypothesis,
     StepBatchItem,
     StepBatchRequest,
     StepBatchResponse,
@@ -244,6 +247,8 @@ async def _run_process_pool_lane(
                     resolved_item.record.path,
                     resolved_item.item.tactics,
                     state_dir=state_store.root_dir,
+                    goal_id=resolved_item.item.goal_id,
+                    auto_resume=resolved_item.item.auto_resume,
                 )
                 if lifecycle.should_cancel(resolved_item.record.item_id):
                     discard_unpromoted_state_paths(
@@ -272,6 +277,23 @@ async def _run_process_pool_lane(
         await return_worker(pantograph_manager, lease)
 
 
+def goal_infos_from_worker(goals: list[PantographGoal]) -> list[GoalInfo]:
+    """Convert worker-side structured goals into the API ``GoalInfo`` model."""
+    return [
+        GoalInfo(
+            target=goal.target,
+            pretty=goal.pretty,
+            hypotheses=[
+                Hypothesis(type=hyp.type, name=hyp.name, value=hyp.value)
+                for hyp in goal.hypotheses
+            ],
+            name=goal.name,
+            sibling_dep=list(goal.sibling_dep),
+        )
+        for goal in goals
+    ]
+
+
 def _step_batch_result_from_worker_results(
     item: StepBatchItem,
     worker_results: list[PantographStepResult],
@@ -291,7 +313,7 @@ def _step_batch_result_from_worker_results(
                 tactic=result.tactic,
                 status=result.status,
                 state_token=state_token,
-                goals=result.goals,
+                goals=goal_infos_from_worker(result.goals),
                 messages=result.messages,
             )
         )

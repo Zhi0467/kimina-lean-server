@@ -20,6 +20,7 @@ from server.schemas_exec import (
     ExecLifecycleStats,
     ExecObservedMetrics,
     ExecRequestLimiterStats,
+    GoalInfo,
     StateInfo,
     ExecStateStoreStats,
     ExecStatsResponse,
@@ -116,7 +117,12 @@ def test_response_models_capture_stable_contract() -> None:
                 states=[
                     StateInfo(
                         state_token="st_root",
-                        goals=["n : Nat\n⊢ n + 0 = n"],
+                        goals=[
+                            GoalInfo(
+                                target="n + 0 = n",
+                                pretty="n : Nat\n⊢ n + 0 = n",
+                            )
+                        ],
                     )
                 ],
             )
@@ -136,7 +142,12 @@ def test_response_models_capture_stable_contract() -> None:
                         tactic="rw [Nat.add_comm]",
                         status="open",
                         state_token="st_child",
-                        goals=["n : Nat\n⊢ 0 + n = n"],
+                        goals=[
+                            GoalInfo(
+                                target="0 + n = n",
+                                pretty="n : Nat\n⊢ 0 + n = n",
+                            )
+                        ],
                     ),
                 ],
             )
@@ -230,7 +241,12 @@ def _schema_test_app() -> FastAPI:
                 CreateStatesResult(
                     item_id=item.item_id,
                     status="open",
-                    states=[StateInfo(state_token=f"st_{item.item_id}", goals=["⊢ P"])],
+                    states=[
+                        StateInfo(
+                            state_token=f"st_{item.item_id}",
+                            goals=[GoalInfo(target="P", pretty="⊢ P")],
+                        )
+                    ],
                     messages=[],
                 )
                 for item in request.items
@@ -287,7 +303,15 @@ def test_exec_schemas_round_trip_through_fastapi() -> None:
     assert create_response.status_code == 200
     assert create_response.json()["items"][0]["states"][0] == {
         "state_token": "st_theorem_42:a0",
-        "goals": ["⊢ P"],
+        "goals": [
+            {
+                "target": "P",
+                "pretty": "⊢ P",
+                "hypotheses": [],
+                "name": None,
+                "sibling_dep": [],
+            }
+        ],
     }
 
     step_response = client.post(

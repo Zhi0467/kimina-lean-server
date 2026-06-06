@@ -8,6 +8,7 @@ from server.exec_backend_utils import distribute_items_across_lanes
 from server.exec_backends import StepBatchBackendConfig, execute_step_batch_request
 from server.exec_lifecycle import ItemLifecycleRegistry
 from server.exec_metrics import ExecMetrics
+from server.pantograph_goal import PantographGoal
 from server.pantograph_manager import PantographManager, header_hash
 from server.pantograph_worker import PantographStepResult
 from server.routers.exec import cleanup as cleanup_endpoint
@@ -35,6 +36,8 @@ class _FakeWorker:
         tactics: list[str],
         *,
         state_dir: Path,
+        goal_id: int | None = None,
+        auto_resume: bool | None = None,
     ) -> list[PantographStepResult]:
         self.step_calls.append((state_path, list(tactics)))
         return [
@@ -71,6 +74,8 @@ class _BlockingWorker(_FakeWorker):
         tactics: list[str],
         *,
         state_dir: Path,
+        goal_id: int | None = None,
+        auto_resume: bool | None = None,
     ) -> list[PantographStepResult]:
         self.step_calls.append((state_path, list(tactics)))
         self.started.set()
@@ -81,7 +86,7 @@ class _BlockingWorker(_FakeWorker):
                     tactic=tactic,
                     status="open",
                     state_path=_write_state(state_dir / f"child_{index}.bin", b"child"),
-                    goals=["⊢ child"],
+                    goals=[PantographGoal(target="child", pretty="⊢ child")],
                 )
                 for index, tactic in enumerate(tactics)
             ]

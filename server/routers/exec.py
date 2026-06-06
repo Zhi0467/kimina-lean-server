@@ -10,6 +10,7 @@ from ..exec_backends import (
     StepBatchBackendConfig,
     StepBatchCapError,
     execute_step_batch_request,
+    goal_infos_from_worker,
     return_worker as _return_worker,
 )
 from ..exec_lifecycle import ItemLifecycleRegistry
@@ -137,7 +138,7 @@ async def create_states(
                         header=split_result.header,
                         header_hash=item_header_hash,
                     ),
-                    goals=state.goals,
+                    goals=goal_infos_from_worker(state.goals),
                 )
                 for state in result.states
             ]

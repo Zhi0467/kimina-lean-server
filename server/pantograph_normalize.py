@@ -3,8 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
+from .pantograph_goal import PantographGoal, PantographHypothesis
+
+
+def goal_state_to_goals(goal_state: Any) -> list[PantographGoal]:
+    """Structured goals for a proof state (target, hypotheses, sibling_dep)."""
+    return [_goal_to_goal(goal) for goal in goal_state.goals]
+
 
 def goal_state_to_goal_texts(goal_state: Any) -> list[str]:
+    """Flattened per-goal renderings (legacy string form / ``pretty`` source)."""
     return [_goal_to_text(goal) for goal in goal_state.goals]
 
 
@@ -39,6 +47,30 @@ def payload_to_messages(payload: object) -> list[str]:
     if hasattr(payload, "data"):
         return [_message_to_text(payload)]
     return [str(payload)]
+
+
+def _goal_to_goal(goal: Any) -> PantographGoal:
+    hypotheses = [
+        _variable_to_hypothesis(variable)
+        for variable in getattr(goal, "variables", [])
+    ]
+    sibling_dep = getattr(goal, "sibling_dep", None)
+    return PantographGoal(
+        target=str(goal.target),
+        pretty=_goal_to_text(goal),
+        hypotheses=hypotheses,
+        name=getattr(goal, "name", None) or None,
+        sibling_dep=sorted(sibling_dep) if sibling_dep else [],
+    )
+
+
+def _variable_to_hypothesis(variable: Any) -> PantographHypothesis:
+    value = getattr(variable, "v", None)
+    return PantographHypothesis(
+        type=str(getattr(variable, "t", "")),
+        name=getattr(variable, "name", None) or None,
+        value=str(value) if value is not None else None,
+    )
 
 
 def _goal_to_text(goal: Any) -> str:

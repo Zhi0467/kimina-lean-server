@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from server.pantograph_goal import PantographHypothesis
 from server.pantograph_worker import PantographWorker
 
 
@@ -34,7 +35,12 @@ async def test_pantograph_worker_creates_and_steps_real_state(
     assert created.messages == []
     assert len(created.states) == 1
     assert created.states[0].path.exists()
-    assert created.states[0].goals == ["n : Nat\n⊢ n + 0 = n"]
+    assert len(created.states[0].goals) == 1
+    created_goal = created.states[0].goals[0]
+    assert created_goal.target == "n + 0 = n"
+    assert created_goal.pretty == "n : Nat\n⊢ n + 0 = n"
+    assert created_goal.hypotheses == [PantographHypothesis(type="Nat", name="n")]
+    assert created_goal.sibling_dep == []
 
     results = await pantograph_worker.step_state_with_tactics(
         created.states[0].path,
@@ -47,7 +53,9 @@ async def test_pantograph_worker_creates_and_steps_real_state(
     assert results[0].state_path is None
     assert results[1].state_path is not None
     assert results[1].state_path.exists()
-    assert results[1].goals == ["n : Nat\n⊢ 0 + n = n"]
+    assert len(results[1].goals) == 1
+    assert results[1].goals[0].target == "0 + n = n"
+    assert results[1].goals[0].pretty == "n : Nat\n⊢ 0 + n = n"
     assert results[2].messages
 
 
@@ -152,6 +160,82 @@ async def test_pantograph_worker_normalizes_complete_and_error_code(
     )
     assert errored.status == "error"
     assert errored.messages
+
+
+async def test_sibling_dep_signals_metavariable_coupling(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    # Independent goals: ``constructor`` on a conjunction yields two goals that
+    # share no metavariable, so every goal's ``sibling_dep`` is empty.
+    conjunction = await pantograph_worker.create_states_from_code(
+        "theorem t : True ∧ True := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    conjunction_split = await pantograph_worker.step_state_with_tactics(
+        conjunction.states[0].path,
+        ["constructor"],
+        state_dir=tmp_path,
+    )
+    assert conjunction_split[0].status == "open"
+    assert len(conjunction_split[0].goals) == 2
+    assert all(goal.sibling_dep == [] for goal in conjunction_split[0].goals)
+
+    # Coupled goals: ``apply Exists.intro`` leaves the witness goal and the
+    # property goal sharing the witness metavariable, so ``printDependentMVars``
+    # populates a non-empty ``sibling_dep`` on at least one of them.
+    existential = await pantograph_worker.create_states_from_code(
+        "theorem t : ∃ n : Nat, n = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    existential_split = await pantograph_worker.step_state_with_tactics(
+        existential.states[0].path,
+        ["apply Exists.intro"],
+        state_dir=tmp_path,
+    )
+    assert existential_split[0].status == "open"
+    assert any(goal.sibling_dep for goal in existential_split[0].goals)
+
+
+async def test_goal_focusing_suspends_siblings(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t : True ∧ True := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    split = await pantograph_worker.step_state_with_tactics(
+        created.states[0].path,
+        ["constructor"],
+        state_dir=tmp_path,
+    )
+    assert split[0].status == "open"
+    two_goal_path = split[0].state_path
+    assert two_goal_path is not None
+    assert len(split[0].goals) == 2
+
+    # Default whole-state step (automatic mode): ``trivial`` proves the first
+    # goal and the second goal auto-resumes, so one goal remains.
+    whole_state = await pantograph_worker.step_state_with_tactics(
+        two_goal_path,
+        ["trivial"],
+        state_dir=tmp_path,
+    )
+    assert whole_state[0].status == "open"
+    assert len(whole_state[0].goals) == 1
+
+    # Focused step: targeting goal 0 with ``auto_resume=False`` suspends the
+    # sibling, so proving goal 0 leaves zero in-scope goals (a clean, undragged
+    # single-goal subtree) even though the theorem as a whole is not done.
+    focused = await pantograph_worker.step_state_with_tactics(
+        two_goal_path,
+        ["trivial"],
+        state_dir=tmp_path,
+        goal_id=0,
+        auto_resume=False,
+    )
+    assert focused[0].status == "complete"
 
 
 async def test_is_alive_tracks_subprocess_state(

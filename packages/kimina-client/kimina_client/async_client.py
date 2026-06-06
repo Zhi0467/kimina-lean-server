@@ -169,7 +169,10 @@ class AsyncKiminaClient(BaseKimina):
         items: list[ExecStepBatchItem],
     ) -> ExecStepBatchResponse:
         url = self.build_url("/exec/step_batch")
-        payload = ExecStepBatchRequest(items=items).model_dump()
+        # Drop unset optional per-item fields (goal_id / auto_resume) so a
+        # whole-state step serialises exactly as before and stays backward
+        # compatible with servers that predate goal-targeted stepping.
+        payload = ExecStepBatchRequest(items=items).model_dump(exclude_none=True)
         resp = await self._query(url, payload)
         return self.handle(resp, ExecStepBatchResponse)
 

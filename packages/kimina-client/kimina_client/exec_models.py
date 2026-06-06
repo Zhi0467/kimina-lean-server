@@ -60,9 +60,32 @@ class ExecCreateStatesRequest(BaseModel):
         return self
 
 
+class ExecHypothesis(BaseModel):
+    """One local-context entry of a goal (``value`` set only for ``let``)."""
+
+    type: str
+    name: str | None = None
+    value: str | None = None
+
+
+class ExecGoalInfo(BaseModel):
+    """Structured representation of a single in-scope goal.
+
+    ``target`` + ``hypotheses`` carry node-identity content; ``sibling_dep``
+    lists indices of sibling goals sharing a metavariable (empty ⇒ independent);
+    ``pretty`` is the flattened rendering for model input / verification.
+    """
+
+    target: str
+    pretty: str = ""
+    hypotheses: list[ExecHypothesis] = Field(default_factory=list[ExecHypothesis])
+    name: str | None = None
+    sibling_dep: list[int] = Field(default_factory=list[int])
+
+
 class ExecStateInfo(BaseModel):
     state_token: str = Field(min_length=1)
-    goals: list[str] = Field(default_factory=list[str])
+    goals: list[ExecGoalInfo] = Field(default_factory=list[ExecGoalInfo])
 
 
 class ExecCreateStatesResult(BaseModel):
@@ -80,6 +103,11 @@ class ExecStepBatchItem(_TimeoutItem):
     node_id: str = Field(min_length=1)
     state_token: str = Field(min_length=1)
     tactics: list[str] = Field(min_length=1)
+    # Optional per-item goal focusing (see server ``StepBatchItem``). ``goal_id``
+    # with ``auto_resume=False`` applies every tactic to that goal with siblings
+    # suspended; unset ⇒ legacy whole-state step.
+    goal_id: int | None = Field(default=None, ge=0)
+    auto_resume: bool | None = None
 
 
 class ExecStepBatchRequest(BaseModel):
@@ -97,7 +125,7 @@ class ExecStepResult(BaseModel):
     tactic: str
     status: ExecStatus
     state_token: str | None = None
-    goals: list[str] = Field(default_factory=list[str])
+    goals: list[ExecGoalInfo] = Field(default_factory=list[ExecGoalInfo])
     messages: list[str] = Field(default_factory=list[str])
 
 

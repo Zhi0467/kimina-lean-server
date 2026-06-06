@@ -180,7 +180,12 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                     {
                         "item_id": "run_1:thm:attempt_1",
                         "status": "open",
-                        "states": [{"state_token": "st_root", "goals": ["⊢ True"]}],
+                        "states": [
+                            {
+                                "state_token": "st_root",
+                                "goals": [{"target": "True", "pretty": "⊢ True"}],
+                            }
+                        ],
                         "messages": [],
                     }
                 ]
@@ -398,7 +403,7 @@ async def test_exec_env_step_node_wraps_one_item() -> None:
                                 "tactic": "simp",
                                 "status": "open",
                                 "state_token": "st_child",
-                                "goals": ["⊢ 0 + n = n"],
+                                "goals": [{"target": "0 + n = n", "pretty": "⊢ 0 + n = n"}],
                             }
                         ],
                     }

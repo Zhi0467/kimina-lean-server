@@ -7,34 +7,45 @@ from pathlib import Path
 from typing import Any
 
 import pantograph  # pyright: ignore[reportMissingTypeStubs]
+from pantograph.expr import Site  # pyright: ignore[reportMissingTypeStubs]
 
+from .pantograph_goal import PantographGoal
 from .pantograph_normalize import (
     exception_to_messages,
-    goal_state_to_goal_texts,
+    goal_state_to_goals,
     messages_to_texts,
 )
 from .schemas_exec import ExecStatus
+
+# Worker startup options handed to ``pantograph.Server``. ``printDependentMVars``
+# makes Pantograph populate each goal's ``sibling_dep`` (the metavariable-coupling
+# signal the search engine's split rule needs).
+DEFAULT_PANTOGRAPH_OPTIONS: dict[str, Any] = {"printDependentMVars": True}
 
 
 def _empty_saved_states() -> list["PantographSavedState"]:
     return []
 
 
-def _empty_step_results() -> list[str]:
+def _empty_messages() -> list[str]:
+    return []
+
+
+def _empty_goals() -> list[PantographGoal]:
     return []
 
 
 @dataclass(frozen=True)
 class PantographSavedState:
     path: Path
-    goals: list[str]
+    goals: list[PantographGoal]
 
 
 @dataclass(frozen=True)
 class PantographCreateResult:
     status: ExecStatus
     states: list[PantographSavedState] = field(default_factory=_empty_saved_states)
-    messages: list[str] = field(default_factory=_empty_step_results)
+    messages: list[str] = field(default_factory=_empty_messages)
 
 
 @dataclass(frozen=True)
@@ -42,8 +53,8 @@ class PantographStepResult:
     tactic: str
     status: ExecStatus
     state_path: Path | None = None
-    goals: list[str] = field(default_factory=_empty_step_results)
-    messages: list[str] = field(default_factory=_empty_step_results)
+    goals: list[PantographGoal] = field(default_factory=_empty_goals)
+    messages: list[str] = field(default_factory=_empty_messages)
 
 
 class PantographWorker:
@@ -59,6 +70,7 @@ class PantographWorker:
         lean_path: str | None = None,
         timeout_seconds: int = 120,
         buffer_limit: int | None = 1_000_000,
+        options: dict[str, Any] | None = None,
     ) -> "PantographWorker":
         server = await pantograph.Server.create(
             imports=imports,
@@ -66,6 +78,7 @@ class PantographWorker:
             lean_path=lean_path,
             timeout=timeout_seconds,
             buffer_limit=buffer_limit,
+            options=DEFAULT_PANTOGRAPH_OPTIONS if options is None else options,
         )
         return cls(server)
 
@@ -90,7 +103,7 @@ class PantographWorker:
                 states.append(
                     PantographSavedState(
                         path=state_path,
-                        goals=goal_state_to_goal_texts(target.goal_state),
+                        goals=goal_state_to_goals(target.goal_state),
                     )
                 )
             return PantographCreateResult(status="open", states=states)
@@ -107,6 +120,8 @@ class PantographWorker:
         tactics: list[str],
         *,
         state_dir: Path,
+        goal_id: int | None = None,
+        auto_resume: bool | None = None,
     ) -> list[PantographStepResult]:
         state_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -122,10 +137,17 @@ class PantographWorker:
                 for tactic in tactics
             ]
 
+        # ``Site()`` (both fields None) serialises to ``{}`` and is therefore
+        # identical to the legacy whole-state step; passing a ``goal_id`` (with
+        # ``auto_resume=False``) focuses that goal and suspends its siblings even
+        # in automatic mode, yielding an undragged single-goal subtree.
+        site = Site(goal_id=goal_id, auto_resume=auto_resume)
         results: list[PantographStepResult] = []
         for tactic in tactics:
             results.append(
-                await self._step_one_tactic(parent_state, tactic, state_dir=state_dir)
+                await self._step_one_tactic(
+                    parent_state, tactic, site=site, state_dir=state_dir
+                )
             )
         return results
 
@@ -173,11 +195,14 @@ class PantographWorker:
         parent_state: Any,
         tactic: str,
         *,
+        site: Site,
         state_dir: Path,
     ) -> PantographStepResult:
         child_path: Path | None = None
         try:
-            child_state = await self._server.goal_tactic_async(parent_state, tactic)
+            child_state = await self._server.goal_tactic_async(
+                parent_state, tactic, site=site
+            )
             messages = messages_to_texts(child_state.messages)
             if child_state.is_solved:
                 return PantographStepResult(
@@ -192,7 +217,7 @@ class PantographWorker:
                 tactic=tactic,
                 status="open",
                 state_path=child_path,
-                goals=goal_state_to_goal_texts(child_state),
+                goals=goal_state_to_goals(child_state),
                 messages=messages,
             )
         except Exception as exc:

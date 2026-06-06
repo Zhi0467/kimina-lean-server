@@ -16,6 +16,7 @@ from server.routers.exec import cleanup as cleanup_endpoint
 from server.routers.exec import create_states as create_states_endpoint
 from server.exec_lifecycle import ItemLifecycleRegistry
 from server.exec_metrics import ExecMetrics
+from server.pantograph_goal import PantographGoal
 from server.pantograph_worker import PantographCreateResult, PantographSavedState
 from server.schemas_exec import CleanupRequest, CreateStatesRequest
 from server.settings import Environment, Settings
@@ -99,7 +100,12 @@ class _BlockingCreateWorker:
         self.state_path.write_bytes(b"root")
         return PantographCreateResult(
             status="open",
-            states=[PantographSavedState(path=self.state_path, goals=["⊢ True"])],
+            states=[
+                PantographSavedState(
+                    path=self.state_path,
+                    goals=[PantographGoal(target="True", pretty="⊢ True")],
+                )
+            ],
         )
 
     def is_alive(self) -> bool:
@@ -610,7 +616,12 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
         assert create_payload["items"][0]["status"] == "open"
         state = create_payload["items"][0]["states"][0]
         assert state["state_token"].startswith("st_")
-        assert state["goals"] == ["n : Nat\n⊢ n + 0 = n"]
+        assert len(state["goals"]) == 1
+        goal = state["goals"][0]
+        assert goal["target"] == "n + 0 = n"
+        assert goal["pretty"] == "n : Nat\n⊢ n + 0 = n"
+        assert goal["hypotheses"] == [{"type": "Nat", "name": "n"}]
+        assert goal["sibling_dep"] == []
 
         step_response = client.post(
             "/exec/step_batch",
@@ -634,7 +645,11 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
             "error",
         ]
         assert step_item["results"][1]["state_token"].startswith("st_")
-        assert step_item["results"][1]["goals"] == ["n : Nat\n⊢ 0 + n = n"]
+        open_goals = step_item["results"][1]["goals"]
+        assert len(open_goals) == 1
+        assert open_goals[0]["target"] == "0 + n = n"
+        assert open_goals[0]["pretty"] == "n : Nat\n⊢ 0 + n = n"
+        assert open_goals[0]["sibling_dep"] == []
         assert step_item["results"][2]["messages"]
 
         cleanup_response = client.post(

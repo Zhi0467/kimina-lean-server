@@ -128,25 +128,48 @@ So the backend never needs an "action" or "value" concept — it returns states.
    identity / dedup).
 
 ## Sequencing
-1. Run Open Checks 1–3 (this pass).
-2. Change 1 (structured goals + `printDependentMVars`).
-3. Change 2 (add optional `goal_id`/`auto_resume`; keep automatic mode).
-4. Confirm text-level recombination via `/verify`.
+1. ~~Run Open Checks 1–3.~~ **Done** (spike 2026-05-31).
+2. ~~Change 1 (structured goals + `printDependentMVars`).~~ **Done** (2026-06-04).
+3. ~~Change 2 (add optional `goal_id`/`auto_resume`; keep automatic mode).~~ **Done**
+   (2026-06-04, landed together with Change 1).
+4. Confirm text-level recombination via `/verify` — unchanged surface; exercised
+   by the existing `/verify` path, no new code.
 
 ## Risks
-- `printDependentMVars` may alter goal text / add cost → verify negligible.
+- ~~`printDependentMVars` may alter goal text / add cost~~ → **verified
+  negligible**: the live worker tests assert the structured goals' `pretty` /
+  `target` are byte-identical to the pre-change strings, so enabling the option
+  did not perturb rendering.
 - Split search mints more state tokens per request → reinforces the
   `max_state_store_bytes` budget + prompt `cleanup` from `safety_net.md`.
 - A non-fatal Lean backtrace was observed at worker startup during spikes
   (consistent with the known continue-on-panic, `docs/pantograph-utf8-panic.md`);
-  results were unaffected, but worth watching when `printDependentMVars` is on.
+  results were unaffected, and the live tests pass with `printDependentMVars` on.
 
-## Status
-- Mechanism verified by spike (2026-05-31): `goal_resume` is not extraction;
-  `auto_resume=False` focuses without dragging **even in automatic mode**;
-  `printDependentMVars` populates `sibling_dep`.
+## Status — IMPLEMENTED (2026-06-04)
+- Mechanism verified by spike (2026-05-31) and now by live tests: `goal_resume`
+  is not extraction; `auto_resume=False` focuses without dragging **even in
+  automatic mode**; `printDependentMVars` populates `sibling_dep`.
 - Open Checks 1–3: **resolved** — keep automatic mode, focusing is per-call
   opt-in; save/load and in-scope-only behaviour confirmed.
 - Net design: **additive only** — structured goals + `printDependentMVars`
   (Change 1) and optional `goal_id`/`auto_resume` on step (Change 2). No server
-  mode change, no extraction endpoint. Ready to implement.
+  mode change, no extraction endpoint.
+
+### What shipped
+- `server/pantograph_goal.py` (new): worker-side `PantographGoal` /
+  `PantographHypothesis` dataclasses.
+- `server/pantograph_normalize.py`: `goal_state_to_goals` builds structured goals
+  (`_goal_to_text` retained as the `pretty` source).
+- `server/pantograph_worker.py`: workers start with
+  `DEFAULT_PANTOGRAPH_OPTIONS = {"printDependentMVars": True}`;
+  `step_state_with_tactics` takes optional `goal_id`/`auto_resume` → `Site`.
+- `server/schemas_exec.py` + client `exec_models.py`: `goals: list[str]` →
+  `list[GoalInfo]` (`{target, pretty, hypotheses:[{type,name,value}], name,
+  sibling_dep}`) on `StateInfo`/`StepResult`; `StepBatchItem` gains optional
+  `goal_id`/`auto_resume`. Client requests serialise with `exclude_none=True`
+  so a whole-state step is wire-identical to before.
+- Live evidence: `tests/test_pantograph_worker.py` asserts `sibling_dep` empty
+  for `constructor` on `∧`, non-empty for `apply Exists.intro`, and that
+  `goal_id=0, auto_resume=False` focuses a goal (proving it leaves zero in-scope
+  goals while the default whole-state step leaves the sibling).
