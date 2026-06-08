@@ -103,11 +103,22 @@ class ExecStepBatchItem(_TimeoutItem):
     node_id: str = Field(min_length=1)
     state_token: str = Field(min_length=1)
     tactics: list[str] = Field(min_length=1)
-    # Optional per-item goal focusing (see server ``StepBatchItem``). ``goal_id``
-    # with ``auto_resume=False`` applies every tactic to that goal with siblings
-    # suspended; unset ⇒ legacy whole-state step.
+    # Optional per-item goal focusing. ``goal_id`` with ``auto_resume=False``
+    # applies every tactic to that goal with its siblings suspended; both unset
+    # ⇒ legacy whole-state step. ``auto_resume`` is meaningful only with a
+    # ``goal_id`` (enforced below).
     goal_id: int | None = Field(default=None, ge=0)
     auto_resume: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_goal_focus(self) -> "ExecStepBatchItem":
+        # ``auto_resume`` only has meaning relative to a focused goal. On its
+        # own it yields a non-empty ``Site`` that either changes behaviour
+        # (``False`` ⇒ suspend siblings) or merely restates the default
+        # (``True``) while diverging from the wire-identical legacy step.
+        if self.auto_resume is not None and self.goal_id is None:
+            raise ValueError("auto_resume requires goal_id")
+        return self
 
 
 class ExecStepBatchRequest(BaseModel):

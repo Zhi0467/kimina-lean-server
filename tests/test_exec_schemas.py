@@ -68,6 +68,31 @@ def test_step_batch_request_validates_items() -> None:
         )
 
 
+def test_step_batch_item_auto_resume_requires_goal_id() -> None:
+    # Legacy whole-state step and any focused step (with a goal_id) are accepted.
+    StepBatchItem(node_id="n0", state_token="st_parent", tactics=["simp"])
+    StepBatchItem(node_id="n0", state_token="st_parent", tactics=["simp"], goal_id=0)
+    StepBatchItem(
+        node_id="n0",
+        state_token="st_parent",
+        tactics=["simp"],
+        goal_id=0,
+        auto_resume=False,
+    )
+
+    # ``auto_resume`` without a ``goal_id`` is meaningless (it diverges from the
+    # wire-identical legacy step without focusing a goal), so it is rejected for
+    # both values.
+    for auto_resume in (False, True):
+        with pytest.raises(ValidationError):
+            StepBatchItem(
+                node_id="n0",
+                state_token="st_parent",
+                tactics=["simp"],
+                auto_resume=auto_resume,
+            )
+
+
 def test_timeout_ms_alias_populates_split_timeouts() -> None:
     item = StepBatchItem(
         node_id="n0",
