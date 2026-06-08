@@ -39,6 +39,8 @@ class PantographGoal:
 
     target: str
     pretty: str
-    hypotheses: list[PantographHypothesis] = field(default_factory=list)
+    hypotheses: list[PantographHypothesis] = field(
+        default_factory=list[PantographHypothesis]
+    )
     name: str | None = None
-    sibling_dep: list[int] = field(default_factory=list)
+    sibling_dep: list[int] = field(default_factory=list[int])

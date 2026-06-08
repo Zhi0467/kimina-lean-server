@@ -1,6 +1,4 @@
 import asyncio
-import textwrap
-import threading
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
@@ -24,6 +22,7 @@ from .routers.health import router as health_router
 from .settings import Environment, Settings
 from .single_process_lock import SingleProcessLock
 from .state_store import StateStore, run_state_gc
+from .startup_banners import log_dev_startup_banner
 
 
 def no_sort(self: GenerateJsonSchema, value: Any, parent_key: Any = None) -> Any:
@@ -38,87 +37,78 @@ def create_app(settings: Settings) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         single_process_lock: SingleProcessLock | None = None
         try:
-            ExecServerConfig.validate_settings(settings)
-            if settings.single_process:
-                single_process_lock = SingleProcessLock(
-                    settings.state_store_dir / ".kimina-lean-server.lock"
-                )
-                single_process_lock.acquire()
-                app.state.single_process_lock = single_process_lock
-
             logger.info(
-                "Running Kimina Lean Server [bold]'v{}'[/bold] in [bold]{}[/bold] mode with Lean version: '{}'",
+                "Running Kimina Lean Server [bold]'v{}'[/bold] in [bold]{}[/bold] environment, [bold]{}[/bold] mode with Lean version: '{}'",
                 __version__,
                 settings.environment.value,
+                settings.mode,
                 settings.lean_version,
             )
-            if settings.database_url:
-                logger.info(f"Database URL = '{settings.database_url}'")
-                try:
-                    await db.connect()
-                    logger.info("DB connected: {}", db.connected)
-                except Exception as e:
-                    logger.exception("Failed to connect to database: %s", e)
 
             app.state.settings = settings
-            manager = Manager(
-                max_repls=settings.max_repls,
-                max_repl_uses=settings.max_repl_uses,
-                max_repl_mem=settings.max_repl_mem,
-                init_repls=settings.init_repls,
-            )
-            app.state.manager = manager
-            app.state.state_store = StateStore(
-                settings.state_store_dir,
-                ttl_seconds=settings.state_ttl_seconds,
-                max_bytes=settings.max_state_store_bytes,
-            )
-            app.state.exec_lifecycle = ItemLifecycleRegistry(
-                terminal_retention_seconds=(
-                    settings.item_lifecycle_terminal_retention_seconds
+
+            if settings.mode == "exec":
+                ExecServerConfig.validate_settings(settings)
+                if settings.single_process:
+                    single_process_lock = SingleProcessLock(
+                        settings.state_store_dir / ".kimina-lean-server.lock"
+                    )
+                    single_process_lock.acquire()
+                    app.state.single_process_lock = single_process_lock
+
+                app.state.state_store = StateStore(
+                    settings.state_store_dir,
+                    ttl_seconds=settings.state_ttl_seconds,
+                    max_bytes=settings.max_state_store_bytes,
                 )
-            )
-            app.state.exec_metrics = ExecMetrics()
-            app.state.exec_request_limiter = ExecRequestLimiter(
-                max_in_flight=settings.max_in_flight_exec_requests,
-                max_queued=settings.max_queued_exec_requests,
-            )
-            app.state.pantograph_manager = PantographManager(
-                max_workers=settings.max_pantograph_workers,
-                project_path=settings.project_dir,
-                buffer_limit=settings.pantograph_buffer_limit,
-                max_worker_uses=settings.max_pantograph_worker_uses,
-                max_workers_per_env_profile=(
-                    settings.max_lean_processes_per_env_profile
-                ),
-                worker_startup_timeout_seconds=(
-                    settings.pantograph_worker_startup_timeout_seconds
-                ),
-            )
-            app.state.state_gc_task = asyncio.create_task(
-                run_state_gc(
-                    app.state.state_store,
-                    interval_seconds=settings.state_gc_interval_seconds,
+                app.state.exec_lifecycle = ItemLifecycleRegistry(
+                    terminal_retention_seconds=(
+                        settings.item_lifecycle_terminal_retention_seconds
+                    )
                 )
-            )
-            await app.state.manager.initialize_repls()
+                app.state.exec_metrics = ExecMetrics()
+                app.state.exec_request_limiter = ExecRequestLimiter(
+                    max_in_flight=settings.max_in_flight_exec_requests,
+                    max_queued=settings.max_queued_exec_requests,
+                )
+                app.state.pantograph_manager = PantographManager(
+                    max_workers=settings.max_pantograph_workers,
+                    project_path=settings.project_dir,
+                    buffer_limit=settings.pantograph_buffer_limit,
+                    max_worker_uses=settings.max_pantograph_worker_uses,
+                    max_workers_per_env_profile=(
+                        settings.max_lean_processes_per_env_profile
+                    ),
+                    worker_startup_timeout_seconds=(
+                        settings.pantograph_worker_startup_timeout_seconds
+                    ),
+                )
+                app.state.state_gc_task = asyncio.create_task(
+                    run_state_gc(
+                        app.state.state_store,
+                        interval_seconds=settings.state_gc_interval_seconds,
+                    )
+                )
+            else:
+                if settings.database_url:
+                    logger.info(f"Database URL = '{settings.database_url}'")
+                    try:
+                        await db.connect()
+                        logger.info("DB connected: {}", db.connected)
+                    except Exception as e:
+                        logger.exception("Failed to connect to database: %s", e)
+
+                manager = Manager(
+                    max_repls=settings.max_repls,
+                    max_repl_uses=settings.max_repl_uses,
+                    max_repl_mem=settings.max_repl_mem,
+                    init_repls=settings.init_repls,
+                )
+                app.state.manager = manager
+                await app.state.manager.initialize_repls()
 
             if settings.environment == Environment.dev:
-                threading.Timer(
-                    0.1,
-                    lambda: logger.info(
-                        "Try me with:\n"
-                        + textwrap.indent(
-                            "curl --request POST \\\n"
-                            "  --url http://localhost:8000/api/check \\\n"
-                            "  --header 'Content-Type: application/json' \\\n"
-                            "  --data '{"
-                            '"snippets":[{"id":"check-nat-test","code":"#check Nat"}]'
-                            "}' | jq\n",
-                            "  ",
-                        )
-                    ),
-                ).start()
+                log_dev_startup_banner(settings.mode, settings.port)
 
             yield
         finally:
@@ -155,22 +145,24 @@ def create_app(settings: Settings) -> FastAPI:
     )
 
     app.include_router(
-        check_router,
-        prefix="/api",
-        tags=["check"],
-    )
-    app.include_router(
         health_router,
         tags=["health"],
     )
-    app.include_router(
-        backward_router,
-        tags=["backward"],
-    )
-    app.include_router(
-        exec_router,
-        tags=["exec"],
-    )
+    if settings.mode == "exec":
+        app.include_router(
+            exec_router,
+            tags=["exec"],
+        )
+    else:
+        app.include_router(
+            check_router,
+            prefix="/api",
+            tags=["check"],
+        )
+        app.include_router(
+            backward_router,
+            tags=["backward"],
+        )
 
     async def log_requests(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]

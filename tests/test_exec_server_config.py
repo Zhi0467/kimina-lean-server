@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from server._exec_server_cli import parse_exec_server_config
+from server._exec_server_cli import parse_exec_server_config, settings_from_cli_args
 from server.exec_server_config import ExecServerConfig
 from server.settings import Settings
 
@@ -91,3 +91,11 @@ def test_python_module_cli_flags_map_to_config() -> None:
     assert config.max_acquire_timeout_ms == 111
     assert config.max_step_timeout_ms == 222
     assert config.single_process is False
+
+
+def test_python_module_cli_mode_maps_to_settings() -> None:
+    config = parse_exec_server_config(["--mode", "verify"])
+    settings = settings_from_cli_args(["--mode", "verify"])
+
+    assert config.workers >= 1
+    assert settings.mode == "verify"

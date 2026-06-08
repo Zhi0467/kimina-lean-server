@@ -2,7 +2,7 @@ import os
 import re
 from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +34,8 @@ def _copy_max_pantograph_workers(data: dict[str, object]) -> int:
 
 
 class Settings(BaseSettings):
+    mode: Literal["verify", "exec"] = "exec"
+
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"

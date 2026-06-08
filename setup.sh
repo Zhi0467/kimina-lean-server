@@ -17,10 +17,12 @@ MATHLIB_BRANCH="${MATHLIB_BRANCH:-bump_to_v4.29.1}"
 
 # The Lean REPL is only used by the legacy `/api/check` path; the Pantograph `/exec`
 # path bundles its own binary and does not need it. It is skipped by default because
-# `repl` has no v4.29.1 release. Set SETUP_REPL=1 to build it (latest is v4.29.0).
+# `repl` has no v4.29.1 release. Set SETUP_REPL=1 to build the closest source tag
+# against the server Lean toolchain.
 SETUP_REPL="${SETUP_REPL:-0}"
 REPL_REPO_URL="${REPL_REPO_URL:-https://github.com/leanprover-community/repl.git}"
 REPL_BRANCH="${REPL_BRANCH:-v4.29.0}"
+REPL_LEAN_VERSION="${REPL_LEAN_VERSION:-${LEAN_SERVER_LEAN_VERSION}}"
 
 command -v curl >/dev/null 2>&1 || { echo >&2 "curl is required"; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo >&2 "git is required";  exit 1; }
@@ -57,6 +59,10 @@ install_repo() {
   fi
   pushd "$name"
     git checkout "${branch}"
+    if [ "$name" = "repl" ]; then
+      printf 'leanprover/lean4:%s\n' "${REPL_LEAN_VERSION}" > lean-toolchain
+      lake update
+    fi
     if [ "$name" = "mathlib4" ]; then
       lake exe cache get
     fi

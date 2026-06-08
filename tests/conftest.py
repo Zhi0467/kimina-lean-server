@@ -13,6 +13,7 @@ from server.settings import Environment, Settings
 @pytest.fixture(params=[])
 def client(request: FixtureRequest) -> TestClient:
     defaults = {
+        "mode": "verify",
         "max_repls": 5,
         "max_repl_uses": 10,
         "init_repls": {},
@@ -32,6 +33,7 @@ def client(request: FixtureRequest) -> TestClient:
 @pytest.fixture(
     params=[
         {
+            "mode": "verify",
             "max_repls": 5,
             "max_repl_uses": 10,
             "init_repls": {},

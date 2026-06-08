@@ -1,6 +1,6 @@
 # Plan: Dual-Mode Separation (mode gate)
 
-Status: ready for implementation, 2026-06-07.
+Status: implemented, 2026-06-07.
 
 One process runs exactly one mode. A search deployment constructs only the
 Pantograph/exec stack; a verify deployment constructs only the REPL/verify
