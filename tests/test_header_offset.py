@@ -1,4 +1,4 @@
-from kimina_client import ReplResponse
+from lean_client import ReplResponse
 
 from server.routers.check import _apply_header_offset
 

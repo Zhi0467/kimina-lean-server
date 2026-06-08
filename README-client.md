@@ -1,6 +1,6 @@
 # Kimina client
 
-`kimina-client` is the downstream-facing Python package for Kimina Lean Server.
+`lean-client` is the downstream-facing Python package for Kimina Lean Server.
 It exposes stable client-side APIs for Lean checking and `/exec` proof-state
 execution. A repo such as LeanFoundry should depend on this package and avoid
 importing server modules such as `server.settings`, `server.main`, or
@@ -13,11 +13,11 @@ For a uv-managed downstream repo, depend on the package subdirectory:
 ```toml
 [project]
 dependencies = [
-    "kimina-client",
+    "lean-client",
 ]
 
 [tool.uv.sources]
-kimina-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/kimina-client", rev = "<pinned-sha-or-tag>" }
+lean-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
 ```
 
 The server app is not imported by the downstream repo. Deploy or launch it as
@@ -26,7 +26,7 @@ an app process, then pass its URL to `AsyncKiminaClient`.
 ## Whole-code checking
 
 ```python
-from kimina_client import KiminaClient
+from lean_client import KiminaClient
 
 # Defaults to LEAN_SERVER_API_URL or http://localhost:8000.
 client = KiminaClient()
@@ -41,7 +41,7 @@ of hand-writing `/exec` JSON. The SearchEngine owns graph/node semantics;
 proof-state expansion items into `/exec/step_batch` requests.
 
 ```python
-from kimina_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
 
 async with AsyncKiminaClient(api_url="http://localhost:8000") as client:
     env = AsyncLeanExecEnv(client, env_profile="lean_init_test")
@@ -75,7 +75,7 @@ knob while keeping the downstream repo oblivious to server internals. Use the
 client-side launch mirror:
 
 ```python
-from kimina_client import ExecServerConfig, launch_server
+from lean_client import ExecServerConfig, launch_server
 
 cfg = ExecServerConfig(
     host="127.0.0.1",
@@ -111,7 +111,7 @@ Setting any bounded cap to `-1` requires `allow_unbounded_exec=True`.
 ## Legacy verification path
 
 ```python
-from kimina_client import KiminaClient
+from lean_client import KiminaClient
 
 client = KiminaClient()
 client.check("#check Nat")

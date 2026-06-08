@@ -68,7 +68,7 @@ For each single-goal state `⊢ P`, a synthetic action should be added to the po
 **R1 — Request-level dispatcher / two-level batching design.**
 Two parallelism levels exist: proof-search level (many theorem/proof-graph searches running simultaneously) and tactic-candidate level (N tactics sampled for one selected proof state). The current backend decision is that the **scheduler unit is the proof-state expansion request**, not an individual tactic. One expansion request contains `state_token + tactics[]` and leases exactly one Lean worker; that worker loads the state once and applies the tactic candidates internally. Many expansion requests from many proof graphs are then batched into one Env Backend `/exec/step_batch` request, matching Kimina's existing "one HTTP request contains many independent items" design. This avoids the bad behavior where 16 tactic candidates from one state become 16 manager jobs and cause the Kimina pool to cold-start 16 identical compatible workers.
 
-Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. The concrete v0 client boundary is the `kimina-client` package: LeanFoundry's EnvBackend adapter wraps `AsyncLeanExecEnv` and `AsyncLeanExecBatcher.from_server_limits`, so request width and in-flight count come from the backend's `/exec/limits` response. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
+Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. The concrete v0 client boundary is the `lean-client` package: LeanFoundry's EnvBackend adapter wraps `AsyncLeanExecEnv` and `AsyncLeanExecBatcher.from_server_limits`, so request width and in-flight count come from the backend's `/exec/limits` response. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
 
 **R2 — HER verified multiplier vs candidate multiplier gap.**
 The theoretical HER amplification (10–50× from Aristotle) assumes most proved subtrees survive standalone re-verification through Kimina. In practice, subproofs that reference outer local context will fail. The actual `her_verified_multiplier` is unknown until the first MCTS training runs. If the gap to `her_candidate_multiplier` is large, HER's flywheel contribution is smaller than expected.
@@ -450,7 +450,7 @@ identical compatible worker until `max_repls` is reached. That is correct for
 independent `/check` code-check items, but wrong for one proof-state expansion.
 
 The implementation boundary is intentionally narrower than the server internals:
-LeanFoundry depends on the `kimina-client` Python package and talks to a running
+LeanFoundry depends on the `lean-client` Python package and talks to a running
 server over HTTP. It does not import `server.settings`, `server.main`,
 `PantographManager`, or backend worker classes. The only place that may mention
 Kimina by name inside LeanFoundry is a small EnvBackend adapter/launcher module;
@@ -562,7 +562,7 @@ Kimina config knobs that become first-class training config:
 
 ```yaml
 env_backend:
-  # Passed to kimina_client.ExecServerConfig by the LeanFoundry launcher.
+  # Passed to lean_client.ExecServerConfig by the LeanFoundry launcher.
   workers: ${profiled_worker_pool_size}
   max_lean_processes_per_env_profile: ${profiled_worker_pool_size}
   recommended_items_per_step_batch: ${profiled_worker_pool_size}
@@ -751,9 +751,9 @@ Validate before any training run.
 The search engine is a Python process that orchestrates MCTS. It has no
 Lean knowledge — it only knows about nodes, actions, values, and scores.
 All Lean execution is delegated to an EnvBackend client. In the v0
-implementation, that client is a LeanFoundry wrapper around `kimina-client`'s
+implementation, that client is a LeanFoundry wrapper around `lean-client`'s
 `AsyncLeanExecEnv` and `AsyncLeanExecBatcher`; the SearchEngine should not
-import `kimina_client` directly.
+import `lean_client` directly.
 
 ### 3.1 Proof Tree Structure and State Equivalence
 
@@ -1738,8 +1738,8 @@ async def generate_rollout_async(args, rollout_id, data_source, evaluation=False
     theorem_groups = data_source.get_samples(args.rollout_batch_size)
 
     # The training repo sees an EnvBackend interface. The current implementation
-    # may wrap kimina_client.AsyncLeanExecEnv internally, but this rollout code
-    # does not import kimina_client and does not know about server internals.
+    # may wrap lean_client.AsyncLeanExecEnv internally, but this rollout code
+    # does not import lean_client and does not know about server internals.
     env = await make_env_backend(args.env_backend_config)
     policy = SlimePolicyClient(args)  # wraps Slime-owned SGLang router
     search_cfg = SearchConfig.from_args(args)
@@ -2462,13 +2462,13 @@ Correct names in LeanFoundry source:   Incorrect (implementation leak):
   /exec/step_batch                       /mcts/step_batch
 ```
 
-- `kimina_client` appears only in the EnvBackend adapter/launcher boundary, for
+- `lean_client` appears only in the EnvBackend adapter/launcher boundary, for
   example `leanfoundry/env_backend/kimina_backend.py`. Search, rollout, eval,
   and training code import `EnvBackend`, not `KiminaClient`.
 - LeanFoundry never imports the server package. No `server.settings`,
   `server.main`, `PantographManager`, or worker classes appear in LeanFoundry.
   The current server is an app process launched by `python -m server` or by
-  `kimina_client.launch_server`.
+  `lean_client.launch_server`.
 - `SGLang` does not appear in LeanFoundry at all. It is internal to
   Slime and accessed through `PolicyClient` and `RLEngineBase`.
 - `MCTS` does not appear as a class name or endpoint name. The search
@@ -2506,12 +2506,12 @@ infra repo    → never imports training repo
 ```
 env_backend/
   EnvBackend protocol and implementation factory
-  kimina_backend.py: the only adapter that imports kimina_client
-  optional launcher wiring around kimina_client.ExecServerConfig and launch_server
+  kimina_backend.py: the only adapter that imports lean_client
+  optional launcher wiring around lean_client.ExecServerConfig and launch_server
   no imports from the server package
 
-kimina-client dependency:
-  Installed from kimina-lean-server/packages/kimina-client by pinned git SHA
+lean-client dependency:
+  Installed from kimina-lean-server/packages/lean-client by pinned git SHA
   Provides AsyncKiminaClient, AsyncLeanExecEnv, AsyncLeanExecBatcher,
   ExecServerConfig, launch_server, and shared /exec Pydantic models
 
@@ -2603,7 +2603,7 @@ The concrete Kimina adapter is small and isolated:
 
 ```python
 # leanfoundry/env_backend/kimina_backend.py
-from kimina_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
 
 class KiminaEnvBackend(EnvBackend):
     async def connect(self) -> None:
@@ -2655,7 +2655,7 @@ The training repo pins the infra repo by exact git SHA:
 infra_repo: github.com/your-org/lean-agent-infra
 infra_git_sha: 9a31c7...
 env_backend_image: ghcr.io/your-org/kimina-lean-server:9a31c7-env2f65ba7
-kimina_client_ref: 9a31c7...
+lean_client_ref: 9a31c7...
 env_profile: lean4.29.1_mathlib_5e932f97
 ```
 
@@ -2670,19 +2670,19 @@ becoming the release story.
 Dev mode:
   Training repo has optional git submodule or sibling checkout at
   third_party/lean-agent-infra.
-  The training repo depends on kimina-client from the backend repo's
-  packages/kimina-client subdirectory by pinned SHA.
+  The training repo depends on lean-client from the backend repo's
+  packages/lean-client subdirectory by pinned SHA.
   Developers run the backend app from source with uv:
     uv sync --dev
     uv run python -m server
   Or LeanFoundry's EnvBackend launcher calls:
-    kimina_client.launch_server(ExecServerConfig(...), server_python=...)
+    lean_client.launch_server(ExecServerConfig(...), server_python=...)
   No Python package publish/install step is required for the server during
   backend development, and LeanFoundry never imports server modules.
 
 Release mode:
   Server deployment is via Docker image with pinned infra SHA and env_profile.
-  The `kimina-client` package is pinned by git SHA or tag and is the only
+  The `lean-client` package is pinned by git SHA or tag and is the only
   Python dependency downstream repos import from this backend repo.
 ```
 

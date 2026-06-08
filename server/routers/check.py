@@ -3,8 +3,8 @@ import json
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from kimina_client import CheckRequest, Infotree, ReplResponse, Snippet
-from kimina_client.models import CheckResponse, CommandResponse, Pos
+from lean_client import CheckRequest, Infotree, ReplResponse, Snippet
+from lean_client.models import CheckResponse, CommandResponse, Pos
 from loguru import logger
 
 from ..auth import require_key

@@ -41,7 +41,7 @@ WORKDIR /root/kimina-lean-server
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 COPY server server
-COPY kimina_client kimina_client
+COPY lean_client lean_client
 COPY prisma prisma
 COPY pyproject.toml uv.lock README.md ./
 

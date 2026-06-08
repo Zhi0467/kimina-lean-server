@@ -141,7 +141,7 @@ class ColorFormatter(logging.Formatter):
         return f"{log_color}{message}{Style.RESET_ALL}"
 
 
-logger = logging.getLogger("kimina-client")
+logger = logging.getLogger("lean-client")
 
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)

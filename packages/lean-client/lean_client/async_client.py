@@ -31,7 +31,7 @@ from .exec_models import (
 from .models import CheckRequest, CheckResponse, Infotree, ReplResponse, Snippet
 from .utils import build_log, find_code_column, find_id_column
 
-logger = logging.getLogger("kimina-client")
+logger = logging.getLogger("lean-client")
 
 
 def _is_non_idempotent_exec_url(url: str) -> bool:

@@ -6,9 +6,9 @@ from typing import Any
 
 import httpx
 import pytest
-import kimina_client.exec_server as exec_server_module
+import lean_client.exec_server as exec_server_module
 
-from kimina_client import (
+from lean_client import (
     AsyncKiminaClient,
     AsyncLeanExecBatcher,
     AsyncLeanExecEnv,

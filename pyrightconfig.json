@@ -1,17 +1,13 @@
 {
   "typeCheckingMode": "strict",
-  "include": ["server", "packages/kimina-client/kimina_client"],
+  "include": ["server", "packages/lean-client/lean_client"],
   "exclude": [
     "tests",
-    "tsts_old",
-    "server/server_old",
-    "packages/kimina-client/kimina_client/infotree.py"
+    "packages/lean-client/lean_client/infotree.py"
   ],
   "ignore": [
     "tests",
-    "tsts_old",
-    "server/server_old",
-    "packages/kimina-client/kimina_client/infotree.py"
+    "packages/lean-client/lean_client/infotree.py"
   ],
   "reportMissingImports": true,
   "venvPath": ".",

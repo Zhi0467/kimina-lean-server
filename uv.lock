@@ -9,8 +9,8 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "kimina-client",
     "kimina-lean-server-dev",
+    "lean-client",
 ]
 
 [[package]]
@@ -779,42 +779,6 @@ wheels = [
 ]
 
 [[package]]
-name = "kimina-client"
-version = "0.1.0"
-source = { editable = "packages/kimina-client" }
-dependencies = [
-    { name = "colorama" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "pygments" },
-    { name = "tabulate" },
-    { name = "tenacity" },
-    { name = "tqdm" },
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
-]
-
-[package.optional-dependencies]
-benchmark = [
-    { name = "datasets" },
-    { name = "pandas" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "colorama", specifier = ">=0.4.6" },
-    { name = "datasets", marker = "extra == 'benchmark'", specifier = ">=4.0.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pandas", marker = "extra == 'benchmark'", specifier = ">=2.0.0" },
-    { name = "pydantic", specifier = ">=2.10.0" },
-    { name = "pygments", specifier = ">=2.0.0" },
-    { name = "tabulate", specifier = ">=0.9.0" },
-    { name = "tenacity", specifier = ">=9.1.2" },
-    { name = "tqdm", specifier = ">=4.0.0" },
-    { name = "typing-extensions", marker = "python_full_version < '3.12'", specifier = ">=4.0.0" },
-]
-provides-extras = ["benchmark"]
-
-[[package]]
 name = "kimina-lean-server-dev"
 version = "0.0.0"
 source = { virtual = "." }
@@ -824,7 +788,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "google-cloud-logging" },
     { name = "httpx" },
-    { name = "kimina-client" },
+    { name = "lean-client" },
     { name = "loguru" },
     { name = "pantograph" },
     { name = "pip" },
@@ -862,7 +826,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.13" },
     { name = "google-cloud-logging", specifier = ">=3.12.1" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "kimina-client", editable = "packages/kimina-client" },
+    { name = "lean-client", editable = "packages/lean-client" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pantograph", git = "https://github.com/stanford-centaur/PyPantograph?rev=ffa7f243824d2762825abddb1e9f6e939ede761f" },
     { name = "pip", specifier = ">=25.1.1" },
@@ -892,6 +856,42 @@ dev = [
     { name = "pytest-sugar", specifier = ">=1.0.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
 ]
+
+[[package]]
+name = "lean-client"
+version = "0.1.0"
+source = { editable = "packages/lean-client" }
+dependencies = [
+    { name = "colorama" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pygments" },
+    { name = "tabulate" },
+    { name = "tenacity" },
+    { name = "tqdm" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+]
+
+[package.optional-dependencies]
+benchmark = [
+    { name = "datasets" },
+    { name = "pandas" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "colorama", specifier = ">=0.4.6" },
+    { name = "datasets", marker = "extra == 'benchmark'", specifier = ">=4.0.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pandas", marker = "extra == 'benchmark'", specifier = ">=2.0.0" },
+    { name = "pydantic", specifier = ">=2.10.0" },
+    { name = "pygments", specifier = ">=2.0.0" },
+    { name = "tabulate", specifier = ">=0.9.0" },
+    { name = "tenacity", specifier = ">=9.1.2" },
+    { name = "tqdm", specifier = ">=4.0.0" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'", specifier = ">=4.0.0" },
+]
+provides-extras = ["benchmark"]
 
 [[package]]
 name = "loguru"

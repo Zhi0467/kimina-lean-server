@@ -115,23 +115,23 @@ Or use the client below.
 
 ## Client
 
-The client lives in its own versioned package, `packages/kimina-client/`
-(distribution name `kimina-client`), wired in as a uv workspace member. From
-this repo it is importable as `kimina_client` via `uv run`; a downstream repo
+The client lives in its own versioned package, `packages/lean-client/`
+(distribution name `lean-client`), wired in as a uv workspace member. From
+this repo it is importable as `lean_client` via `uv run`; a downstream repo
 depends on it directly, e.g.
 
 ```toml
 [project]
-dependencies = ["kimina-client"]
+dependencies = ["lean-client"]
 
 [tool.uv.sources]
-kimina-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/kimina-client", rev = "<pinned-sha-or-tag>" }
+lean-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
 ```
 
 For whole-code checking:
 
 ```python
-from kimina_client import KiminaClient
+from lean_client import KiminaClient
 client = KiminaClient() # Defaults to "http://localhost:8000", no API key
 client.check("#check Nat")
 ```
@@ -141,7 +141,7 @@ client package only. It does not import server internals or know how workers are
 implemented:
 
 ```python
-from kimina_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
 
 async with AsyncKiminaClient(api_url="http://localhost:8000") as client:
     env = AsyncLeanExecEnv(client, env_profile="lean_init_test")
@@ -156,7 +156,7 @@ launcher mirror. The launcher uses only stdlib `subprocess`; `server_python`
 points at the server checkout's virtualenv.
 
 ```python
-from kimina_client import ExecServerConfig, launch_server
+from lean_client import ExecServerConfig, launch_server
 
 cfg = ExecServerConfig(
     host="127.0.0.1",
@@ -210,7 +210,7 @@ the dataset, but you can select your own column names.
 
 Example with [Goedel-LM/Lean-workbook-proofs](https://huggingface.co/datasets/Goedel-LM/Lean-workbook-proofs):
 ```python
-from kimina_client import KiminaClient
+from lean_client import KiminaClient
 
 client = KiminaClient()
 client.run_benchmark(dataset_name="Goedel-LM/Lean-workbook-proofs", 
@@ -247,7 +247,7 @@ To reproduce:
 - Server command: `uv run python -m server` (no `.env` file)
 - Client (from ipython / Jupyter notebook or `python -m asyncio`):
 ```python
-from kimina_client import AsyncKiminaClient
+from lean_client import AsyncKiminaClient
 client = AsyncKiminaClient() # defaults to "http://localhost:8000", no API key
 
 # Add `reuse=False` to prevent REPL reuse across requests

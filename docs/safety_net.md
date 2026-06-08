@@ -6,7 +6,7 @@ process) per server is the default we size for.
 
 ## Layers a request passes through
 
-1. **Client batcher** (`kimina_client`, in the caller's process) — shapes the HTTP
+1. **Client batcher** (`lean_client`, in the caller's process) — shapes the HTTP
    requests. Knobs: `max_items` (request *width*), `max_in_flight_batches`
    (per-client request *count*), `max_wait_ms`, plus per-item
    `acquire_timeout_ms` / `step_timeout_ms`. Derived from the server's
@@ -106,8 +106,8 @@ LeanFoundry should not import server internals. The launch contract is:
 - CLI side: `python -m server` exposes matching flags, including `--workers`,
   admission caps, state-store cap, timeout caps, recommendations, and
   `--single-process` / `--no-single-process`.
-- Client side: `kimina_client.ExecServerConfig` mirrors the launch fields using
-  stdlib-only code, and `kimina_client.launch_server(cfg, server_python=...)`
+- Client side: `lean_client.ExecServerConfig` mirrors the launch fields using
+  stdlib-only code, and `lean_client.launch_server(cfg, server_python=...)`
   builds `python -m server ...` and starts it with `subprocess.Popen`.
 
 ## Final defaults

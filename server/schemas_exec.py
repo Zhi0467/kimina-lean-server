@@ -1,18 +1,18 @@
 """Server-side view of the exec wire schemas.
 
-The exec request/response models are defined once in the ``kimina_client``
+The exec request/response models are defined once in the ``lean_client``
 package (the single source of truth for the wire contract) and re-exported here
 under the unprefixed names the server code and tests use — mirroring how the
-verify/check path already imports its schemas from ``kimina_client``. The
+verify/check path already imports its schemas from ``lean_client``. The
 client's public API exposes the same models under the ``Exec``-prefixed names.
 
-Add new exec wire fields/models in ``kimina_client.exec_models`` and surface
+Add new exec wire fields/models in ``lean_client.exec_models`` and surface
 them here; do not redefine them in this module.
 """
 
 from __future__ import annotations
 
-from kimina_client.exec_models import (
+from lean_client.exec_models import (
     CancelStatus as CancelStatus,
     CleanupDeferredReason as CleanupDeferredReason,
     CleanupStatus as CleanupStatus,

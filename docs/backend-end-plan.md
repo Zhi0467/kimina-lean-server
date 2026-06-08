@@ -531,7 +531,7 @@ The status, timeout, and cleanup changes in this plan are schema changes that
 must land in lockstep on both sides; there are two copies of the exec models.
 
 - Add `overloaded` and `cancelled` to `ExecStatus` in both
-  `server/schemas_exec.py` and `kimina_client/exec_models.py`.
+  `server/schemas_exec.py` and `lean_client/exec_models.py`.
 - Add separate literal status types for cleanup (`deleted` | `deferred`) and
   cancel (`cancelling` | `drained` | `cleaned`) instead of overloading
   `ExecStatus`.

@@ -23,12 +23,12 @@ dependencies = [
     "colorama>=0.4.6",
     "tabulate>=0.9.0",
     "pantograph",
-    "kimina-client",
+    "lean-client",
     "typing-extensions>=4.14.1",
 ]
 
 [tool.uv.workspace]
-members = ["packages/kimina-client"]
+members = ["packages/lean-client"]
 
 [tool.uv]
 package = false
@@ -48,7 +48,7 @@ dev-dependencies = [
 
 [tool.uv.sources]
 pantograph = { git = "https://github.com/stanford-centaur/PyPantograph", rev = "ffa7f243824d2762825abddb1e9f6e939ede761f" }
-kimina-client = { workspace = true }
+lean-client = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match' -x"
@@ -62,8 +62,8 @@ markers = [
 [tool.mypy]
 plugins = ['pydantic.mypy']
 strict = true
-files = ["packages/kimina-client/kimina_client", "server"]
-exclude = "^packages/kimina-client/kimina_client/infotree\\.py$"
+files = ["packages/lean-client/lean_client", "server"]
+exclude = "^packages/lean-client/lean_client/infotree\\.py$"
 ignore_missing_imports = true
 allow_untyped_decorators = true
 disable_error_code = ["unused-ignore"]

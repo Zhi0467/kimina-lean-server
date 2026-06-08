@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
-from kimina_client import BackwardResponse, Snippet, VerifyRequestBody, VerifyResponse
-from kimina_client.models import extend
+from lean_client import BackwardResponse, Snippet, VerifyRequestBody, VerifyResponse
+from lean_client.models import extend
 
 from ..auth import require_key
 from ..manager import Manager

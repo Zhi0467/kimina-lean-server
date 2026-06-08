@@ -1,6 +1,6 @@
 import asyncio
 
-from kimina_client import AsyncKiminaClient, AsyncLeanExecEnv
+from lean_client import AsyncKiminaClient, AsyncLeanExecEnv
 
 
 async def main() -> None:
