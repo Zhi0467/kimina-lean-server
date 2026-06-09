@@ -1,6 +1,12 @@
 # Plan: Exec Observability + Verify-Equivalence Spike
 
-Status: ready for implementation, 2026-06-07.
+Status: implemented, 2026-06-08.
+
+Implementation note: the Phase 0 spike landed in
+[exec-diagnostics-spike.md](exec-diagnostics-spike.md). It found that
+`/exec/verify` is viable on the warm Pantograph pool when implemented as a full
+standalone compile plus `#print axioms <theorem_name>`, with rejection for Lean
+errors, `sorry`/`sorryAx`, and disallowed axioms.
 
 Give the `/exec` path structured diagnostics (errors with positions), split
 timing (pool-wait vs Lean compute), and optional CPU/RAM under a debug flag.

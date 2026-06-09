@@ -24,6 +24,7 @@ def test_exec_mode_mounts_only_exec_routes() -> None:
 
     assert "/exec/create_states" in paths
     assert "/exec/step_batch" in paths
+    assert "/exec/verify" in paths
     assert "/exec/limits" in paths
     assert "/exec/stats" in paths
     assert "/health" in paths
@@ -41,6 +42,7 @@ def test_verify_mode_mounts_only_verify_routes() -> None:
     assert "/health" in paths
     assert "/exec/create_states" not in paths
     assert "/exec/step_batch" not in paths
+    assert "/exec/verify" not in paths
     assert "/exec/limits" not in paths
     assert "/exec/stats" not in paths
 

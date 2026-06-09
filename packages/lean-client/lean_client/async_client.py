@@ -27,6 +27,9 @@ from .exec_models import (
     ExecStepBatchItem,
     ExecStepBatchRequest,
     ExecStepBatchResponse,
+    ExecVerifyItem,
+    ExecVerifyRequest,
+    ExecVerifyResponse,
 )
 from .models import CheckRequest, CheckResponse, Infotree, ReplResponse, Snippet
 from .utils import build_log, find_code_column, find_id_column
@@ -35,7 +38,11 @@ logger = logging.getLogger("lean-client")
 
 
 def _is_non_idempotent_exec_url(url: str) -> bool:
-    return url.endswith("/exec/create_states") or url.endswith("/exec/step_batch")
+    return (
+        url.endswith("/exec/create_states")
+        or url.endswith("/exec/step_batch")
+        or url.endswith("/exec/verify")
+    )
 
 
 def _is_exec_request_overload(url: str, status_code: int) -> bool:
@@ -175,6 +182,19 @@ class AsyncKiminaClient(BaseKimina):
         payload = ExecStepBatchRequest(items=items).model_dump(exclude_none=True)
         resp = await self._query(url, payload)
         return self.handle(resp, ExecStepBatchResponse)
+
+    async def exec_verify(
+        self,
+        env_profile: str,
+        items: list[ExecVerifyItem],
+    ) -> ExecVerifyResponse:
+        url = self.build_url("/exec/verify")
+        payload = ExecVerifyRequest(
+            env_profile=env_profile,
+            items=items,
+        ).model_dump()
+        resp = await self._query(url, payload)
+        return self.handle(resp, ExecVerifyResponse)
 
     async def exec_cleanup(self, item_ids: list[str]) -> ExecCleanupResponse:
         url = self.build_url("/exec/cleanup")

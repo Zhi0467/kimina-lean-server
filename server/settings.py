@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     max_create_items_per_request: int = 1024
     max_acquire_timeout_ms: int = 600_000
     max_step_timeout_ms: int = 600_000
+    # Axioms ``/exec/verify`` trusts by default when an item omits its own
+    # allow-list. The three Lean 4 / Mathlib core axioms — a version-stable set;
+    # ``sorryAx`` is intentionally absent, so ``sorry`` is always rejected.
+    verify_allowed_axioms: list[str] = Field(
+        default_factory=lambda: ["Classical.choice", "propext", "Quot.sound"]
+    )
     max_in_flight_exec_requests: int = DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS
     max_queued_exec_requests: int = DEFAULT_MAX_QUEUED_EXEC_REQUESTS
     allow_unbounded_exec: bool = False

@@ -93,7 +93,9 @@ class _BlockingCreateWorker:
         code: str,
         *,
         state_dir: Path,
+        debug: bool = False,
     ) -> PantographCreateResult:
+        _ = debug
         self.create_calls += 1
         self.started.set()
         await self.release.wait()
@@ -607,14 +609,19 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
                         "item_id": "theorem_42:a0",
                         "code": "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
                         "timeout_ms": 30000,
+                        "debug": True,
                     }
                 ],
             },
         )
         assert create_response.status_code == 200
         create_payload = create_response.json()
-        assert create_payload["items"][0]["status"] == "open"
-        state = create_payload["items"][0]["states"][0]
+        create_item = create_payload["items"][0]
+        assert create_item["status"] == "open"
+        assert create_item["diagnostics"]["acquire_ms"] >= 0
+        assert create_item["diagnostics"]["lean_ms"] >= 0
+        assert create_item["diagnostics"]["debug"]["memory_max"] > 0
+        state = create_item["states"][0]
         assert state["state_token"].startswith("st_")
         assert len(state["goals"]) == 1
         goal = state["goals"][0]
@@ -632,6 +639,7 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
                         "state_token": state["state_token"],
                         "tactics": ["simp", "rw [Nat.add_comm]", "bad_tactic"],
                         "timeout_ms": 30000,
+                        "debug": True,
                     }
                 ]
             },
@@ -639,6 +647,9 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
         assert step_response.status_code == 200
         step_item = step_response.json()["items"][0]
         assert step_item["node_id"] == "theorem_42:a0:n0"
+        assert step_item["diagnostics"]["acquire_ms"] >= 0
+        assert step_item["diagnostics"]["lean_ms"] >= 0
+        assert step_item["diagnostics"]["debug"]["memory_max"] > 0
         assert [result["status"] for result in step_item["results"]] == [
             "complete",
             "open",
@@ -650,7 +661,10 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
         assert open_goals[0]["target"] == "0 + n = n"
         assert open_goals[0]["pretty"] == "n : Nat\n⊢ 0 + n = n"
         assert open_goals[0]["sibling_dep"] == []
-        assert step_item["results"][2]["messages"]
+        bad_tactic_message = step_item["results"][2]["messages"][0]
+        assert bad_tactic_message["severity"] == "error"
+        assert "unknown tactic" in bad_tactic_message["data"]
+        assert bad_tactic_message["pos"] == {"line": 1, "col": 1}
 
         cleanup_response = client.post(
             "/exec/cleanup",
@@ -659,6 +673,87 @@ def test_exec_create_step_and_cleanup_real_pantograph_e2e(tmp_path: Path) -> Non
         assert cleanup_response.status_code == 200
         assert cleanup_response.json()["deleted_items"][0]["status"] == "deleted"
         assert cleanup_response.json()["deleted_items"][0]["deleted_states"] == 2
+
+
+def test_exec_create_bad_snippet_returns_positioned_message(tmp_path: Path) -> None:
+    with _test_client(tmp_path) as client:
+        response = client.post(
+            "/exec/create_states",
+            json={
+                "env_profile": "lean_init_test",
+                "items": [
+                    {
+                        "item_id": "bad:a0",
+                        "code": "import Init\n\ntheorem t : True := by\n  exact False",
+                        "timeout_ms": 30000,
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["status"] == "error"
+        assert item["diagnostics"]["acquire_ms"] >= 0
+        assert item["diagnostics"]["lean_ms"] >= 0
+        message = item["messages"][0]
+        assert message["severity"] == "error"
+        assert "Type mismatch" in message["data"]
+        assert message["pos"] == {"line": 4, "col": 2}
+
+
+def test_exec_verify_accepts_clean_rejects_sorry_and_axioms(
+    tmp_path: Path,
+) -> None:
+    with _test_client(tmp_path) as client:
+        response = client.post(
+            "/exec/verify",
+            json={
+                "env_profile": "lean_init_test",
+                "items": [
+                    {
+                        "item_id": "good:a0",
+                        "code": "theorem clean : True := by\n  trivial",
+                        "theorem_name": "clean",
+                        "timeout_ms": 30000,
+                        "debug": True,
+                    },
+                    {
+                        "item_id": "sorry:a0",
+                        "code": "theorem withSorry : True := by\n  sorry",
+                        "theorem_name": "withSorry",
+                        "timeout_ms": 30000,
+                    },
+                    {
+                        "item_id": "axiom:a0",
+                        "code": (
+                            "axiom bad : False\n"
+                            "theorem usesBad : False := by\n"
+                            "  exact bad"
+                        ),
+                        "theorem_name": "usesBad",
+                        "timeout_ms": 30000,
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        items = {item["item_id"]: item for item in response.json()["items"]}
+
+        assert items["good:a0"]["status"] == "accepted"
+        assert items["good:a0"]["axioms"] == []
+        assert items["good:a0"]["diagnostics"]["debug"]["memory_max"] > 0
+
+        assert items["sorry:a0"]["status"] == "rejected"
+        assert "sorryAx" in items["sorry:a0"]["axioms"]
+
+        assert items["axiom:a0"]["status"] == "rejected"
+        assert items["axiom:a0"]["axioms"] == ["bad"]
+        assert any(
+            message["data"] == "disallowed axioms: bad"
+            for message in items["axiom:a0"]["messages"]
+        )
 
 
 def test_exec_routes_validate_and_report_invalid_tokens_e2e(tmp_path: Path) -> None:

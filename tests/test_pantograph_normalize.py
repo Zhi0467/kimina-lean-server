@@ -8,6 +8,7 @@ from server.pantograph_normalize import (
     exception_to_messages,
     goal_state_to_goal_texts,
     goal_state_to_goals,
+    payload_to_exec_messages,
     payload_to_messages,
 )
 
@@ -109,3 +110,23 @@ def test_payload_to_messages_extracts_nested_pantograph_payloads() -> None:
 
 def test_exception_to_messages_handles_empty_exceptions() -> None:
     assert exception_to_messages(RuntimeError()) == ["RuntimeError"]
+
+
+def test_server_error_payload_omits_category_tag() -> None:
+    # ``error`` here is a category ("io"), not display text: the single message
+    # comes from ``desc`` (with its parsed position); "io" must not leak as its
+    # own message.
+    messages = payload_to_exec_messages(
+        {
+            "desc": "<anonymous>:2:7: error: unexpected end of input\n",
+            "error": "io",
+        },
+        default_severity="error",
+    )
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.severity == "error"
+    assert message.data == "unexpected end of input"
+    assert message.pos is not None
+    assert (message.pos.line, message.pos.col) == (2, 7)

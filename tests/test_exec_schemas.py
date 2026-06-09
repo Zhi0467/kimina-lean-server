@@ -16,8 +16,11 @@ from server.schemas_exec import (
     CreateStatesRequest,
     CreateStatesResponse,
     CreateStatesResult,
+    ExecDebugInfo,
+    ExecDiagnostics,
     ExecLimitsResponse,
     ExecLifecycleStats,
+    ExecMessage,
     ExecObservedMetrics,
     ExecRequestLimiterStats,
     GoalInfo,
@@ -31,6 +34,9 @@ from server.schemas_exec import (
     StepBatchResponse,
     StepBatchResult,
     StepResult,
+    VerifyRequest,
+    VerifyResponse,
+    VerifyResult,
 )
 
 
@@ -93,6 +99,25 @@ def test_step_batch_item_auto_resume_requires_goal_id() -> None:
             )
 
 
+def test_verify_request_validates_unique_item_ids() -> None:
+    with pytest.raises(ValidationError):
+        VerifyRequest(
+            env_profile="lean4.29.1_mathlib_x",
+            items=[
+                {
+                    "item_id": "theorem_42:a0",
+                    "code": "theorem t : True := by trivial",
+                    "theorem_name": "t",
+                },
+                {
+                    "item_id": "theorem_42:a0",
+                    "code": "theorem t : True := by trivial",
+                    "theorem_name": "t",
+                },
+            ],
+        )
+
+
 def test_timeout_ms_alias_populates_split_timeouts() -> None:
     item = StepBatchItem(
         node_id="n0",
@@ -139,6 +164,7 @@ def test_response_models_capture_stable_contract() -> None:
             CreateStatesResult(
                 item_id="theorem_42:a0",
                 status="open",
+                diagnostics=ExecDiagnostics(acquire_ms=1.0, lean_ms=2.0),
                 states=[
                     StateInfo(
                         state_token="st_root",
@@ -154,11 +180,17 @@ def test_response_models_capture_stable_contract() -> None:
         ]
     )
     assert create_response.items[0].states[0].state_token == "st_root"
+    assert create_response.items[0].diagnostics is not None
 
     step_response = StepBatchResponse(
         items=[
             StepBatchResult(
                 node_id="theorem_42:a0:n0",
+                diagnostics=ExecDiagnostics(
+                    acquire_ms=1.0,
+                    lean_ms=2.0,
+                    debug=ExecDebugInfo(cpu_max=10.0, memory_max=1024),
+                ),
                 results=[
                     StepResult(tactic="simp", status="complete"),
                     StepResult(tactic="busy", status="overloaded"),
@@ -179,6 +211,19 @@ def test_response_models_capture_stable_contract() -> None:
         ]
     )
     assert step_response.items[0].results[3].state_token == "st_child"
+    assert step_response.items[0].diagnostics is not None
+
+    verify_response = VerifyResponse(
+        items=[
+            VerifyResult(
+                item_id="theorem_42:a0",
+                theorem_name="t",
+                status="accepted",
+                diagnostics=ExecDiagnostics(acquire_ms=1.0, lean_ms=2.0),
+            )
+        ]
+    )
+    assert verify_response.items[0].status == "accepted"
 
     cancel_response = CancelResponse(
         items=[CancelResult(item_id="theorem_42:a0", status="drained")]
@@ -273,6 +318,7 @@ def _schema_test_app() -> FastAPI:
                         )
                     ],
                     messages=[],
+                    diagnostics=ExecDiagnostics(acquire_ms=0.0, lean_ms=0.0),
                 )
                 for item in request.items
             ]
@@ -284,8 +330,13 @@ def _schema_test_app() -> FastAPI:
             items=[
                 StepBatchResult(
                     node_id=item.node_id,
+                    diagnostics=ExecDiagnostics(acquire_ms=0.0, lean_ms=0.0),
                     results=[
-                        StepResult(tactic=tactic, status="error", messages=["stub"])
+                        StepResult(
+                            tactic=tactic,
+                            status="error",
+                            messages=[ExecMessage(severity="error", data="stub")],
+                        )
                         for tactic in item.tactics
                     ],
                 )

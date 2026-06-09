@@ -38,7 +38,9 @@ class _FakeWorker:
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        debug: bool = False,
     ) -> list[PantographStepResult]:
+        _ = debug
         self.step_calls.append((state_path, list(tactics)))
         return [
             PantographStepResult(tactic=tactic, status="complete")
@@ -76,7 +78,9 @@ class _BlockingWorker(_FakeWorker):
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        debug: bool = False,
     ) -> list[PantographStepResult]:
+        _ = debug
         self.step_calls.append((state_path, list(tactics)))
         self.started.set()
         await self.release.wait()

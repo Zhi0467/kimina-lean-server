@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from time import perf_counter
 
 from .exec_backend_utils import (
     compatibility_key,
@@ -19,6 +20,10 @@ from .pantograph_goal import PantographGoal
 from .pantograph_worker import PantographStepResult
 from .schemas_exec import (
     ExecStatus,
+    ExecDebugInfo,
+    ExecDiagnostics,
+    ExecMessage,
+    ExecMessageSeverity,
     GoalInfo,
     Hypothesis,
     StepBatchItem,
@@ -219,36 +224,50 @@ async def _run_process_pool_lane(
                 )
                 continue
             if lease is None:
+                acquire_start = perf_counter()
                 try:
                     lease = await pantograph_manager.get_worker(
                         env_profile=resolved_item.record.env_profile,
                         header=resolved_item.record.header,
                         timeout=resolved_item.item.acquire_timeout_ms / 1000,
                     )
+                    acquire_ms = _elapsed_ms(acquire_start)
                     if lifecycle.should_cancel(resolved_item.record.item_id):
                         slots[resolved_item.index] = _item_status_result(
                             resolved_item.item,
                             "cancelled",
                             f"item {resolved_item.record.item_id!r} is cancelled",
+                            diagnostics=_diagnostics(acquire_ms=acquire_ms),
                         )
                         continue
                 except NoAvailablePantographWorkerError as exc:
+                    acquire_ms = _elapsed_ms(acquire_start)
                     slots[resolved_item.index] = _item_status_result(
                         resolved_item.item,
                         "overloaded",
                         str(exc),
+                        diagnostics=_diagnostics(acquire_ms=acquire_ms),
                     )
                     continue
+            else:
+                acquire_ms = 0.0
             lease.worker.set_timeout_seconds(
                 _timeout_seconds(resolved_item.item.step_timeout_ms)
             )
             try:
+                lean_start = perf_counter()
                 worker_results = await lease.worker.step_state_with_tactics(
                     resolved_item.record.path,
                     resolved_item.item.tactics,
                     state_dir=state_store.root_dir,
                     goal_id=resolved_item.item.goal_id,
                     auto_resume=resolved_item.item.auto_resume,
+                    debug=resolved_item.item.debug,
+                )
+                diagnostics = _diagnostics(
+                    acquire_ms=acquire_ms,
+                    lean_ms=_elapsed_ms(lean_start),
+                    debug=_debug_from_worker_results(worker_results),
                 )
                 if lifecycle.should_cancel(resolved_item.record.item_id):
                     discard_unpromoted_state_paths(
@@ -258,17 +277,20 @@ async def _run_process_pool_lane(
                         resolved_item.item,
                         "cancelled",
                         f"item {resolved_item.record.item_id!r} is cancelled",
+                        diagnostics=diagnostics,
                     )
                 else:
                     slots[resolved_item.index] = _step_batch_result_from_worker_results(
                         resolved_item.item,
                         worker_results,
                         state_store=state_store,
+                        diagnostics=diagnostics,
                     )
             except Exception as exc:
                 slots[resolved_item.index] = _item_error_result(
                     resolved_item.item,
                     str(exc),
+                    diagnostics=_diagnostics(acquire_ms=acquire_ms),
                 )
             if not lease.worker.is_alive():
                 await return_worker(pantograph_manager, lease)
@@ -299,6 +321,7 @@ def _step_batch_result_from_worker_results(
     worker_results: list[PantographStepResult],
     *,
     state_store: StateStore,
+    diagnostics: ExecDiagnostics,
 ) -> StepBatchResult:
     results: list[StepResult] = []
     for result in worker_results:
@@ -317,7 +340,11 @@ def _step_batch_result_from_worker_results(
                 messages=result.messages,
             )
         )
-    return StepBatchResult(node_id=item.node_id, results=results)
+    return StepBatchResult(
+        node_id=item.node_id,
+        results=results,
+        diagnostics=diagnostics,
+    )
 
 
 def _invalid_token_result(
@@ -330,33 +357,79 @@ def _invalid_token_result(
             StepResult(
                 tactic=tactic,
                 status="invalid_state_token",
-                messages=[str(exc)],
+                messages=[_message(str(exc), severity="error")],
             )
             for tactic in item.tactics
         ],
+        diagnostics=_diagnostics(),
     )
 
 
-def _item_error_result(item: StepBatchItem, message: str) -> StepBatchResult:
-    return _item_status_result(item, "error", message)
+def _item_error_result(
+    item: StepBatchItem,
+    message: str,
+    *,
+    diagnostics: ExecDiagnostics | None = None,
+) -> StepBatchResult:
+    return _item_status_result(item, "error", message, diagnostics=diagnostics)
 
 
 def _item_status_result(
     item: StepBatchItem,
     status: ExecStatus,
     message: str,
+    *,
+    diagnostics: ExecDiagnostics | None = None,
 ) -> StepBatchResult:
     return StepBatchResult(
         node_id=item.node_id,
         results=[
-            StepResult(tactic=tactic, status=status, messages=[message])
+            StepResult(
+                tactic=tactic,
+                status=status,
+                messages=[_message(message, severity="error")],
+            )
             for tactic in item.tactics
         ],
+        diagnostics=diagnostics or _diagnostics(),
     )
 
 
 def _timeout_seconds(timeout_ms: int) -> int:
     return max((timeout_ms + 999) // 1000, 1)
+
+
+def _elapsed_ms(start: float) -> float:
+    return max((perf_counter() - start) * 1000, 0.0)
+
+
+def _diagnostics(
+    *,
+    acquire_ms: float = 0.0,
+    lean_ms: float = 0.0,
+    debug: ExecDebugInfo | None = None,
+) -> ExecDiagnostics:
+    return ExecDiagnostics(acquire_ms=acquire_ms, lean_ms=lean_ms, debug=debug)
+
+
+def _debug_from_worker_results(
+    worker_results: list[PantographStepResult],
+) -> ExecDebugInfo | None:
+    debug_items = [result.debug for result in worker_results if result.debug is not None]
+    if not debug_items:
+        return None
+    return ExecDebugInfo(
+        cpu_max=max(item.cpu_max for item in debug_items),
+        memory_max=max(item.memory_max for item in debug_items),
+    )
+
+
+def _message(
+    text: str,
+    *,
+    severity: ExecMessageSeverity = "info",
+) -> ExecMessage:
+    return ExecMessage(severity=severity, data=text)
 
 
 async def return_worker(

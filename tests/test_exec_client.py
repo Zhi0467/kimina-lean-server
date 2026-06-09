@@ -25,6 +25,8 @@ from lean_client import (
     ExecStepBatchResponse,
     ExecStepBatchResult,
     ExecStepResult,
+    ExecVerifyItem,
+    ExecVerifyResponse,
     ExecStatsResponse,
     UncertainMicrobatchError,
 )
@@ -199,6 +201,15 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                 ]
             },
             {
+                "items": [
+                    {
+                        "item_id": "run_1:thm:attempt_1",
+                        "status": "accepted",
+                        "theorem_name": "t",
+                    }
+                ]
+            },
+            {
                 "deleted_items": [
                     {
                         "item_id": "run_1:thm:attempt_1",
@@ -293,6 +304,17 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
             )
         ]
     )
+    verify = await client.exec_verify(
+        "lean_init",
+        [
+            ExecVerifyItem(
+                item_id="run_1:thm:attempt_1",
+                code="theorem t : True := by\n  trivial",
+                theorem_name="t",
+                timeout_ms=1000,
+            )
+        ],
+    )
     cleanup = await client.exec_cleanup(["run_1:thm:attempt_1"])
     cancel = await client.exec_cancel(["run_1:thm:attempt_1"])
     limits = await client.exec_limits()
@@ -301,6 +323,8 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
     assert isinstance(create, ExecCreateStatesResponse)
     assert create.items[0].states[0].state_token == "st_root"
     assert step.items[0].results[0].status == "complete"
+    assert isinstance(verify, ExecVerifyResponse)
+    assert verify.items[0].status == "accepted"
     assert isinstance(cleanup, ExecCleanupResponse)
     assert cleanup.deleted_items[0].deleted_states == 1
     assert isinstance(cancel, ExecCancelResponse)
@@ -320,6 +344,7 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                         "code": "theorem t : True := by\n  sorry",
                         "acquire_timeout_ms": 1000,
                         "step_timeout_ms": 1000,
+                        "debug": False,
                     }
                 ],
             },
@@ -335,8 +360,27 @@ async def test_async_client_exec_methods_build_stable_payloads() -> None:
                         "tactics": ["trivial"],
                         "acquire_timeout_ms": 1000,
                         "step_timeout_ms": 1000,
+                        "debug": False,
                     }
                 ]
+            },
+            "POST",
+        ),
+        (
+            "http://lean.example/exec/verify",
+            {
+                "env_profile": "lean_init",
+                "items": [
+                    {
+                        "item_id": "run_1:thm:attempt_1",
+                        "code": "theorem t : True := by\n  trivial",
+                        "theorem_name": "t",
+                        "allowed_axioms": None,
+                        "acquire_timeout_ms": 1000,
+                        "step_timeout_ms": 1000,
+                        "debug": False,
+                    }
+                ],
             },
             "POST",
         ),
@@ -425,6 +469,7 @@ async def test_exec_env_step_node_wraps_one_item() -> None:
                 "tactics": ["simp"],
                 "acquire_timeout_ms": 7000,
                 "step_timeout_ms": 7000,
+                "debug": False,
             }
         ]
     }

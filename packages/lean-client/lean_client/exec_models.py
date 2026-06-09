@@ -17,11 +17,43 @@ ExecStatus = Literal[
 CleanupStatus = Literal["deleted", "deferred"]
 CleanupDeferredReason = Literal["in_flight", "pinned"]
 CancelStatus = Literal["cancelling", "drained", "cleaned"]
+ExecMessageSeverity = Literal["trace", "info", "warning", "error"]
+ExecVerifyStatus = Literal[
+    "accepted",
+    "rejected",
+    "error",
+    "overloaded",
+    "cancelled",
+]
+
+
+class ExecPos(BaseModel):
+    line: int = Field(ge=1)
+    col: int = Field(ge=0)
+
+
+class ExecMessage(BaseModel):
+    severity: ExecMessageSeverity
+    data: str
+    pos: ExecPos | None = None
+    end_pos: ExecPos | None = None
+
+
+class ExecDebugInfo(BaseModel):
+    cpu_max: float = Field(ge=0)
+    memory_max: int = Field(ge=0)
+
+
+class ExecDiagnostics(BaseModel):
+    acquire_ms: float = Field(ge=0)
+    lean_ms: float = Field(ge=0)
+    debug: ExecDebugInfo | None = None
 
 
 class _TimeoutItem(BaseModel):
     acquire_timeout_ms: int = Field(default=5000, ge=1)
     step_timeout_ms: int = Field(default=5000, ge=1)
+    debug: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -92,7 +124,8 @@ class ExecCreateStatesResult(BaseModel):
     item_id: str
     status: ExecStatus
     states: list[ExecStateInfo] = Field(default_factory=list[ExecStateInfo])
-    messages: list[str] = Field(default_factory=list[str])
+    messages: list[ExecMessage] = Field(default_factory=list[ExecMessage])
+    diagnostics: ExecDiagnostics | None = None
 
 
 class ExecCreateStatesResponse(BaseModel):
@@ -137,16 +170,51 @@ class ExecStepResult(BaseModel):
     status: ExecStatus
     state_token: str | None = None
     goals: list[ExecGoalInfo] = Field(default_factory=list[ExecGoalInfo])
-    messages: list[str] = Field(default_factory=list[str])
+    messages: list[ExecMessage] = Field(default_factory=list[ExecMessage])
 
 
 class ExecStepBatchResult(BaseModel):
     node_id: str
     results: list[ExecStepResult] = Field(default_factory=list[ExecStepResult])
+    diagnostics: ExecDiagnostics | None = None
 
 
 class ExecStepBatchResponse(BaseModel):
     items: list[ExecStepBatchResult]
+
+
+class ExecVerifyItem(_TimeoutItem):
+    item_id: str = Field(min_length=1)
+    code: str = Field(min_length=1)
+    theorem_name: str = Field(min_length=1)
+    # ``None`` ⇒ use the server's default trusted-axiom allow-list; an explicit
+    # list (including ``[]`` to demand an axiom-free proof) overrides it.
+    allowed_axioms: list[str] | None = None
+
+
+class ExecVerifyRequest(BaseModel):
+    env_profile: str = Field(min_length=1)
+    items: list[ExecVerifyItem] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_item_ids(self) -> "ExecVerifyRequest":
+        item_ids = [item.item_id for item in self.items]
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("item_id values must be unique")
+        return self
+
+
+class ExecVerifyResult(BaseModel):
+    item_id: str
+    status: ExecVerifyStatus
+    theorem_name: str
+    axioms: list[str] = Field(default_factory=list[str])
+    messages: list[ExecMessage] = Field(default_factory=list[ExecMessage])
+    diagnostics: ExecDiagnostics | None = None
+
+
+class ExecVerifyResponse(BaseModel):
+    items: list[ExecVerifyResult]
 
 
 class ExecCleanupRequest(BaseModel):
