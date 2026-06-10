@@ -1,4 +1,4 @@
-exclude: '^(client|examples)/'
+exclude: '^examples/'
 
 default_install_hook_types:
   - pre-commit
