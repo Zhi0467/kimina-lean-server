@@ -71,8 +71,11 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-      - name: Run performance tests
-        run: uv run pytest -m perfs
+      # The only -m perfs test exercises the REPL/verify path (/api/check), which
+      # isn't mounted in exec mode and needs the repl binary (SETUP_REPL=1).
+      # Re-enable once the verify path is built/tested in CI.
+      # - name: Run performance tests
+      #   run: uv run pytest -m perfs
 
       # - name: Run backward compatibility tests # Only one core on Github actions, so takes 11 minutes
       #   run: uv run pytest -n auto -m match
