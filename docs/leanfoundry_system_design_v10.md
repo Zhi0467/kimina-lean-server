@@ -1,5 +1,18 @@
 # LeanFoundry
-## Full System Design — v8
+## Full System Design — v10
+
+> **v10 (2026-06-09):** §2 reconciled with the shipped `/exec` backend —
+> structured `goals` (`GoalInfo`) and `messages` (`ExecMessage`), per-result
+> `diagnostics`, the new `/exec/verify` warm-pool certification endpoint
+> ("path C"), and the `LEAN_SERVER_MODE=verify|exec` mode split. Throughout
+> this document, references to "strict `/verify`" / "Kimina re-verification"
+> for *proof* acceptance now mean `/exec/verify` in exec mode; the REPL
+> `/verify` is verify-mode-only and used for autoformalized *statement*
+> checks (Extension B). The client surface is now the single
+> `AsyncLeanExecBackend` façade, and the server always runs as a **separate
+> process** (Docker image or `python -m server`) reached over HTTP — never
+> launched in-process by the client. Training, search, and roadmap design are
+> unchanged from v8/v9.
 
 ---
 
@@ -68,7 +81,7 @@ For each single-goal state `⊢ P`, a synthetic action should be added to the po
 **R1 — Request-level dispatcher / two-level batching design.**
 Two parallelism levels exist: proof-search level (many theorem/proof-graph searches running simultaneously) and tactic-candidate level (N tactics sampled for one selected proof state). The current backend decision is that the **scheduler unit is the proof-state expansion request**, not an individual tactic. One expansion request contains `state_token + tactics[]` and leases exactly one Lean worker; that worker loads the state once and applies the tactic candidates internally. Many expansion requests from many proof graphs are then batched into one Env Backend `/exec/step_batch` request, matching Kimina's existing "one HTTP request contains many independent items" design. This avoids the bad behavior where 16 tactic candidates from one state become 16 manager jobs and cause the Kimina pool to cold-start 16 identical compatible workers.
 
-Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. The concrete v0 client boundary is the `lean-client` package: LeanFoundry's EnvBackend adapter wraps `AsyncLeanExecEnv` and `AsyncLeanExecBatcher.from_server_limits`, so request width and in-flight count come from the backend's `/exec/limits` response. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
+Within one theorem, MCTS iterations remain strictly sequential — iteration N's selection depends on backpropagation from iteration N-1. Across theorem/proof-graph searches, expansion requests are independent and can be batched. The concrete v0 client boundary is the `lean-client` package: LeanFoundry's EnvBackend adapter uses the single `AsyncLeanExecBackend` façade (which owns the HTTP client, the proof-state env, and the step batcher, sized from `/exec/limits`), so request width and in-flight count come from the backend's `/exec/limits` response. Remaining empirical questions are the EnvClient microbatch window, max items per HTTP request, queue-depth backpressure, and worker-pool sizing. These are v0 profiling parameters, not open semantic design questions.
 
 **R2 — HER verified multiplier vs candidate multiplier gap.**
 The theoretical HER amplification (10–50× from Aristotle) assumes most proved subtrees survive standalone re-verification through Kimina. In practice, subproofs that reference outer local context will fail. The actual `her_verified_multiplier` is unknown until the first MCTS training runs. If the gap to `her_candidate_multiplier` is large, HER's flywheel contribution is smaller than expected.
@@ -417,8 +430,8 @@ Kimina Lean Server (project-numina/kimina-lean-server) provides:
 - LRU cache keyed by import header: workers pre-loaded with Mathlib
   are reused across requests with the same header, avoiding repeated
   ~60s Mathlib import overhead
-- Whole-proof batch verification endpoint (/verify)
-- Infotree extraction (tactic state annotations)
+- Whole-proof batch verification endpoint (/verify) — REPL/verify-mode only
+- Infotree extraction (tactic state annotations) — REPL/verify-mode only
 
 This is the infrastructure we build on. We do NOT build a separate
 LeanStepServer. We fork Kimina and add MCTS capabilities as new job
@@ -455,6 +468,19 @@ server over HTTP. It does not import `server.settings`, `server.main`,
 `PantographManager`, or backend worker classes. The only place that may mention
 Kimina by name inside LeanFoundry is a small EnvBackend adapter/launcher module;
 the SearchEngine sees an `EnvBackend` interface, not a concrete server.
+
+### 2.2.1 Server Mode: verify | exec
+
+The server boots in exactly one mode, selected by `LEAN_SERVER_MODE` (default
+`exec`). A search/RL deployment runs **exec mode**: it constructs only the
+Pantograph worker pool + state store and mounts `/exec/*` (including
+`/exec/verify`) + `/health`; the legacy REPL routes (`/api/check`, `/verify`)
+are not mounted. A batch-verification deployment runs **verify mode**: the Lean
+REPL pool + `/api/check` + `/verify`, with no Pantograph pool. One process never
+constructs both stacks. Search-path proof acceptance therefore uses
+`/exec/verify` (§2.7), not the REPL `/verify`. In all cases the server runs as a
+**separate process** — its Docker image or `python -m server` from a checkout —
+reached over HTTP; the client (§3) never launches it in-process.
 
 ### 2.3 State Representation: Opaque Token, Local Tmp File Backing
 
@@ -523,9 +549,9 @@ async def step_item(worker: PantographWorker, item: StepItem) -> StepItemResult:
             child_token = state_store.save(worker, child)
             results.append(StepResult(
                 tactic=tactic,
-                status="solved" if child.is_solved else "incomplete",
-                next_state_token=child_token,
-                goals=child.goals,
+                status="complete" if child.is_solved else "open",
+                state_token=child_token,
+                goals=child.goals,    # structured GoalInfo objects, not strings
             ))
         except TacticFailure as err:
             results.append(StepResult(tactic=tactic, status="error", messages=err.messages))
@@ -533,8 +559,10 @@ async def step_item(worker: PantographWorker, item: StepItem) -> StepItemResult:
 ```
 
 The worker must delete temporary in-process goal states after each item to keep
-Lean memory stable. Final proof acceptance still requires strict `/verify`
-without `sorry`/`sorryAx`.
+Lean memory stable. A `complete` status here means the tactic closed the goals
+in the interactive session; final reward-grade acceptance still requires
+`/exec/verify` (full standalone compile + `#print axioms`), which rejects
+`sorry`/`sorryAx` and disallowed axioms (§2.7).
 
 ### 2.6 Scheduler Policy
 
@@ -562,7 +590,9 @@ Kimina config knobs that become first-class training config:
 
 ```yaml
 env_backend:
-  # Passed to lean_client.ExecServerConfig by the LeanFoundry launcher.
+  # The server's own launch settings (env vars / CLI flags) used when you run
+  # its Docker image or `python -m server`. The client connects over HTTP; it
+  # does not launch the server in-process.
   workers: ${profiled_worker_pool_size}
   max_lean_processes_per_env_profile: ${profiled_worker_pool_size}
   recommended_items_per_step_batch: ${profiled_worker_pool_size}
@@ -600,11 +630,19 @@ request width or in-flight count. The client refuses unbounded safety caps.
 {
   "max_pantograph_workers": 8,
   "max_lean_processes_per_env_profile": 8,
+  "max_items_per_step_batch": 1024,
+  "max_tactics_per_step_item": 64,
+  "max_attempts_per_step_batch": 8192,
+  "max_create_items_per_request": 1024,
   "max_in_flight_exec_requests": 8,
   "max_queued_exec_requests": 32,
   "max_state_store_bytes": 17179869184,
+  "max_acquire_timeout_ms": 600000,
+  "max_step_timeout_ms": 600000,
   "recommended_items_per_step_batch": 8,
-  "recommended_in_flight_step_batches": 8
+  "recommended_in_flight_step_batches": 8,
+  "single_process": true,
+  "cleanup_policy": "defer_while_in_flight"
 }
 ```
 
@@ -620,7 +658,8 @@ Initializes Pantograph states from Lean code containing one or more sorry goals.
       "item_id": "thm_001:attempt_0",
       "code": "import Mathlib\n\ntheorem t (n : Nat) : n + 0 = n := by\n  sorry",
       "acquire_timeout_ms": 5000,
-      "step_timeout_ms": 5000
+      "step_timeout_ms": 5000,
+      "debug": false
     }
   ]
 }
@@ -637,10 +676,19 @@ Response:
       "states": [
         {
           "state_token": "st_root...",
-          "goals": ["n : Nat\n⊢ n + 0 = n"]
+          "goals": [
+            {
+              "target": "n + 0 = n",
+              "pretty": "n : Nat\n⊢ n + 0 = n",
+              "hypotheses": [{"type": "Nat", "name": "n", "value": null}],
+              "name": null,
+              "sibling_dep": []
+            }
+          ]
         }
       ],
-      "messages": []
+      "messages": [],
+      "diagnostics": {"acquire_ms": 12.0, "lean_ms": 340.0}
     }
   ]
 }
@@ -681,34 +729,84 @@ Response:
           "tactic": "rw [Nat.add_comm]",
           "status": "open",
           "state_token": "st_child...",
-          "goals": ["n : Nat\n⊢ 0 + n = n"],
+          "goals": [
+            {
+              "target": "0 + n = n",
+              "pretty": "n : Nat\n⊢ 0 + n = n",
+              "hypotheses": [{"type": "Nat", "name": "n", "value": null}],
+              "name": null,
+              "sibling_dep": []
+            }
+          ],
           "messages": []
         }
-      ]
+      ],
+      "diagnostics": {"acquire_ms": 0.0, "lean_ms": 210.0}
     }
   ]
 }
 ```
+
+`messages` entries are structured `ExecMessage` objects
+(`{severity, data, pos?, end_pos?}`); positions are body-relative and the
+router applies the import-header line offset before returning them.
 
 Additional operational endpoints:
 - `POST /exec/cleanup` deletes all states for completed `item_id`s.
 - `POST /exec/cancel` marks `item_id`s for cancellation.
 - `GET /exec/stats` exposes state-store, lifecycle, limiter, and worker stats.
 
-**POST /verify** (unchanged from Kimina)
+**POST /exec/verify** (warm-pool proof certification — "path C")
 
+Reward-grade acceptance for an assembled proof runs on the same warm Pantograph
+pool as stepping — no separate REPL service, no cold start. The worker compiles
+the full proof standalone and appends `#print axioms <theorem_name>`, rejecting
+Lean errors, `sorry`/`sorryAx`, and any axiom outside the item's allow-list. A
+completed stepped state is not a sufficient certificate on its own — it does not
+enumerate the proof term's transitive axiom dependencies.
+
+Request:
 ```json
 {
   "env_profile": "lean4.29.1_mathlib_5e932f97",
-  "statements": [
+  "items": [
     {
-      "id": "thm_001",
-      "header": "import Mathlib\nimport Aesop",
-      "proof": "theorem foo : P ∧ Q := by constructor <;> exact h"
+      "item_id": "thm_001:final",
+      "code": "import Mathlib\n\ntheorem foo (n : Nat) : n + 0 = n := by\n  rw [Nat.add_zero]",
+      "theorem_name": "foo",
+      "allowed_axioms": null,
+      "acquire_timeout_ms": 5000,
+      "step_timeout_ms": 10000,
+      "debug": false
     }
   ]
 }
 ```
+`allowed_axioms: null` inherits the server default trusted set
+(`propext, Classical.choice, Quot.sound`, via the `verify_allowed_axioms`
+setting); `[]` demands an axiom-free proof.
+
+Response:
+```json
+{
+  "items": [
+    {
+      "item_id": "thm_001:final",
+      "status": "accepted",
+      "theorem_name": "foo",
+      "axioms": [],
+      "messages": [],
+      "diagnostics": {"acquire_ms": 4.0, "lean_ms": 1200.0}
+    }
+  ]
+}
+```
+`status` is `accepted | rejected | error | overloaded | cancelled`.
+
+The legacy REPL **`POST /verify`** (Kimina's original
+`{statements:[{id, header, proof}]}` whole-file check) still exists but only in
+**verify mode** (see §2.2.1) — used for autoformalized *statement* checks
+(Extension B), not search-path proof acceptance.
 
 ### 2.8 Validation Harness
 
@@ -751,9 +849,9 @@ Validate before any training run.
 The search engine is a Python process that orchestrates MCTS. It has no
 Lean knowledge — it only knows about nodes, actions, values, and scores.
 All Lean execution is delegated to an EnvBackend client. In the v0
-implementation, that client is a LeanFoundry wrapper around `lean-client`'s
-`AsyncLeanExecEnv` and `AsyncLeanExecBatcher`; the SearchEngine should not
-import `lean_client` directly.
+implementation, that client is the `lean-client` `AsyncLeanExecBackend` façade
+(one object owning the HTTP client, the proof-state env, and the step batcher);
+the SearchEngine should not import `lean_client` directly.
 
 ### 3.1 Proof Tree Structure and State Equivalence
 
@@ -1009,7 +1107,7 @@ async def expand(state: FactorizedProofState, model_client, env_client, n_tactic
 
 A proved internal node is a candidate training root. HER candidates become
 A-type data only after context reification, proof rendering, deduplication,
-and strict Kimina `/verify` under the same env_profile.
+and `/exec/verify` (§2.7, path C) under the same env_profile.
 
 The proof is represented as a `TacticNode` tree (see concern G3). HER
 candidates are extracted by iterating all proved subtree roots in the tree.
@@ -2512,8 +2610,9 @@ env_backend/
 
 lean-client dependency:
   Installed from kimina-lean-server/packages/lean-client by pinned git SHA
-  Provides AsyncKiminaClient, AsyncLeanExecEnv, AsyncLeanExecBatcher,
-  ExecServerConfig, launch_server, and shared /exec Pydantic models
+  Provides AsyncLeanExecBackend (the façade consumers use), the underlying
+  AsyncKiminaClient / AsyncLeanExecEnv / AsyncLeanExecBatcher layers,
+  ExecServerConfig + launch_server (dev-only), and shared /exec Pydantic models
 
 backend app process:
   Runs from the kimina-lean-server checkout or image via python -m server
@@ -2603,13 +2702,14 @@ The concrete Kimina adapter is small and isolated:
 
 ```python
 # leanfoundry/env_backend/kimina_backend.py
-from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+from lean_client import AsyncLeanExecBackend
 
 class KiminaEnvBackend(EnvBackend):
     async def connect(self) -> None:
-        self._client = AsyncKiminaClient(api_url=self.base_url)
-        self._env = AsyncLeanExecEnv(self._client, env_profile=self.env_profile)
-        self._batcher = await AsyncLeanExecBatcher.from_server_limits(self._env)
+        # One façade owns the HTTP client, proof-state env, and step batcher.
+        self._backend = await AsyncLeanExecBackend.connect(
+            self.base_url, env_profile=self.env_profile
+        )
 ```
 
 All other LeanFoundry modules depend on `EnvBackend`; this adapter is the only
@@ -2672,13 +2772,15 @@ Dev mode:
   third_party/lean-agent-infra.
   The training repo depends on lean-client from the backend repo's
   packages/lean-client subdirectory by pinned SHA.
-  Developers run the backend app from source with uv:
+  Developers run the backend app from source as a separate process with uv:
     uv sync --dev
     uv run python -m server
-  Or LeanFoundry's EnvBackend launcher calls:
-    lean_client.launch_server(ExecServerConfig(...), server_python=...)
+  or run the server's Docker image. Either way the server is a separate
+  process; LeanFoundry connects to its URL and never imports server modules.
+  (lean_client.launch_server exists only as a dev convenience for scripts that
+  want to spawn that process; it is not used in normal operation.)
   No Python package publish/install step is required for the server during
-  backend development, and LeanFoundry never imports server modules.
+  backend development.
 
 Release mode:
   Server deployment is via Docker image with pinned infra SHA and env_profile.

@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 ARG APP_VERSION=2.0.0
-ARG LEAN_SERVER_LEAN_VERSION=v4.26.0
+ARG LEAN_SERVER_LEAN_VERSION=v4.29.1
 ARG REPL_REPO_URL=https://github.com/FrederickPu/repl.git
 ARG REPL_BRANCH=lean415compat
 ARG MATHLIB_REPO_URL=https://github.com/leanprover-community/mathlib4.git
@@ -15,7 +15,7 @@ ENV LEAN_SERVER_LEAN_VERSION=${LEAN_SERVER_LEAN_VERSION} \
     LEAN_SERVER_PORT=8000 \
     LEAN_SERVER_LOG_LEVEL=INFO \
     LEAN_SERVER_ENVIRONMENT=prod \
-    LEAN_SERVER_LEAN_VERSION=${LEAN_SERVER_LEAN_VERSION} \
+    LEAN_SERVER_MODE=exec \
     LEAN_SERVER_REPL_PATH=/repl/.lake/build/bin/repl \
     LEAN_SERVER_PROJECT_DIR=/mathlib4 \
     LEAN_SERVER_MAX_REPLS= \
@@ -41,7 +41,7 @@ WORKDIR /root/kimina-lean-server
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 COPY server server
-COPY lean_client lean_client
+COPY packages/lean-client packages/lean-client
 COPY prisma prisma
 COPY pyproject.toml uv.lock README.md ./
 

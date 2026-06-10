@@ -19,6 +19,9 @@ from .exec_models import (
     ExecStepBatchRequest,
     ExecStepBatchResponse,
     ExecStepBatchResult,
+    ExecVerifyItem,
+    ExecVerifyResponse,
+    ExecVerifyResult,
 )
 
 
@@ -121,6 +124,45 @@ class AsyncLeanExecEnv:
 
     async def stats(self) -> ExecStatsResponse:
         return await self.client.exec_stats()
+
+    async def verify(
+        self,
+        items: list[ExecVerifyItem],
+        *,
+        env_profile: str | None = None,
+    ) -> ExecVerifyResponse:
+        return await self.client.exec_verify(env_profile or self.env_profile, items)
+
+    async def verify_one(
+        self,
+        item_id: str,
+        code: str,
+        theorem_name: str,
+        *,
+        allowed_axioms: list[str] | None = None,
+        env_profile: str | None = None,
+        timeout_ms: int | None = None,
+        acquire_timeout_ms: int | None = None,
+        step_timeout_ms: int | None = None,
+    ) -> ExecVerifyResult:
+        response = await self.verify(
+            [
+                ExecVerifyItem(
+                    item_id=item_id,
+                    code=code,
+                    theorem_name=theorem_name,
+                    allowed_axioms=allowed_axioms,
+                    acquire_timeout_ms=(
+                        acquire_timeout_ms or timeout_ms or self.acquire_timeout_ms
+                    ),
+                    step_timeout_ms=(
+                        step_timeout_ms or timeout_ms or self.step_timeout_ms
+                    ),
+                )
+            ],
+            env_profile=env_profile,
+        )
+        return response.items[0]
 
     async def step_batch_resumable(
         self,

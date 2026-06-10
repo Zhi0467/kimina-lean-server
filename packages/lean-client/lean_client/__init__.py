@@ -3,6 +3,7 @@ import sys
 from typing import Any
 
 from .async_client import AsyncKiminaClient, ExecRequestOverloadedError
+from .exec_backend import AsyncLeanExecBackend
 from .exec_env import AsyncLeanExecBatcher, AsyncLeanExecEnv
 from .exec_journal import (
     ExecMicrobatchJournal,
@@ -73,6 +74,7 @@ from .sync_client import KiminaClient
 
 __all__ = [
     "AsyncKiminaClient",
+    "AsyncLeanExecBackend",
     "AsyncLeanExecBatcher",
     "AsyncLeanExecEnv",
     "BackwardResponse",

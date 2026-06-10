@@ -35,40 +35,60 @@ client.check("#check Nat")
 
 ## Exec environment client
 
-LeanFoundry/SearchEngine code should call the search-facing exec wrapper instead
-of hand-writing `/exec` JSON. The SearchEngine owns graph/node semantics;
-`AsyncLeanExecEnv` owns the HTTP calls; `AsyncLeanExecBatcher` shapes
-proof-state expansion items into `/exec/step_batch` requests.
+LeanFoundry/SearchEngine code should talk to the search-facing exec backend
+instead of hand-writing `/exec` JSON. The server runs as a **separate process**
+(its Docker image or `python -m server` from a checkout); the client only
+connects to it over HTTP.
+
+`AsyncLeanExecBackend` is the single entry point — one object that owns the HTTP
+client, the proof-state env wrapper, and the step batcher. Construct it with
+`connect()` (which reads `/exec/limits` to size batching) and use it as an async
+context manager.
 
 ```python
-from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
+from lean_client import AsyncLeanExecBackend
 
-async with AsyncKiminaClient(api_url="http://localhost:8000") as client:
-    env = AsyncLeanExecEnv(client, env_profile="lean_init_test")
-    batcher = await AsyncLeanExecBatcher.from_server_limits(env)
-
-    created = await env.create_states(
+async with await AsyncLeanExecBackend.connect(
+    "http://localhost:8000", env_profile="lean_init_test"
+) as backend:
+    created = await backend.create_states(
         "run_123:theorem_42:attempt_1",
         "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
     )
     state_token = created.items[0].states[0].state_token
 
-    stepped = await batcher.submit_step(
+    stepped = await backend.step(                    # coalesced into /exec/step_batch
         "run_123:theorem_42:attempt_1:n0",
         state_token,
         ["simp", "rw [Nat.add_comm]"],
     )
 
-    await env.cleanup(["run_123:theorem_42:attempt_1"])
+    verdict = await backend.verify_one(              # warm-pool proof certification
+        "run_123:theorem_42:attempt_1",
+        "theorem t (n : Nat) : n + 0 = n := by simp",
+        "t",
+    )
+
+    await backend.cleanup(["run_123:theorem_42:attempt_1"])
 ```
 
-Use one unique `item_id` per search attempt. A `node_id` should include enough
-caller-side identity to map the response back to the proof graph. The batcher
-derives request width and in-flight limits from `/exec/limits`, serializes live
-requests for the same `item_id`, retries observed `overloaded` results, and
-refuses to configure itself from a server that advertises unbounded safety caps.
+Use one unique `item_id` per search attempt; a `node_id` should carry enough
+caller-side identity to map the response back to the proof graph. `step` derives
+request width and in-flight limits from `/exec/limits`, serializes live requests
+for the same `item_id`, retries observed `overloaded` results, and refuses a
+server that advertises unbounded safety caps. The composed layers remain
+available as `backend.client` / `backend.env` / `backend.batcher` for escape
+hatches; routine search code should not need them.
 
-## Programmatic server launch
+## Programmatic server launch (dev convenience only)
+
+> The supported deployment runs the server as its **own process** — its Docker
+> image, or `python -m server` from a checkout — reached over HTTP. The helper
+> below is a dev/test convenience for spawning that process from a script; it
+> requires the `server` checkout to be importable in `server_python`'s
+> environment and is **not** how a consumer like LeanFoundry runs in production
+> (there the server is a separate container/process and the client holds only its
+> URL).
 
 Some downstream workflows want a vLLM-style "start the service for this job"
 knob while keeping the downstream repo oblivious to server internals. Use the
