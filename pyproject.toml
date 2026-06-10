@@ -51,12 +51,13 @@ pantograph = { git = "https://github.com/stanford-centaur/PyPantograph", rev = "
 lean-client = { workspace = true }
 
 [tool.pytest.ini_options]
-addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match' -x"
+addopts = "--asyncio-mode=auto --maxfail=1 --cov=server -m 'not perfs and not match and not verify' -x"
 norecursedirs = [".claude"]
 log_cli_level = "INFO"
 markers = [
     "perfs: performance tests that are not run by default",
-    "match: tests which ensure backward-compatibility with kimina-lean-server"
+    "match: tests which ensure backward-compatibility with kimina-lean-server",
+    "verify: REPL/verify-path integration tests; need the repl binary (SETUP_REPL=1)"
 ]
 
 [tool.mypy]

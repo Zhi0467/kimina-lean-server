@@ -21,6 +21,10 @@ from server.settings import settings
 
 from .utils import assert_json_equal
 
+# REPL/verify-path integration tests: spawn a real Lean REPL subprocess, so they
+# need the repl binary (built only with SETUP_REPL=1). Deselected from default CI.
+pytestmark = pytest.mark.verify
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(

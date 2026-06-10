@@ -3,6 +3,10 @@ import pytest
 from server.errors import NoAvailableReplError
 from server.manager import Manager
 
+# REPL/verify-path integration tests: spawn real Lean REPL subprocesses, so they
+# need the repl binary (built only with SETUP_REPL=1). Deselected from default CI.
+pytestmark = pytest.mark.verify
+
 
 @pytest.mark.asyncio
 async def test_lazy_lock_initialization() -> None:

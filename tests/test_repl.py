@@ -6,6 +6,10 @@ from lean_client import Snippet
 
 from server.repl import Repl
 
+# REPL/verify-path integration tests: spawn a real Lean REPL subprocess, so they
+# need the repl binary (built only with SETUP_REPL=1). Deselected from default CI.
+pytestmark = pytest.mark.verify
+
 
 @pytest.fixture
 async def repl() -> AsyncGenerator[Repl, None]:
