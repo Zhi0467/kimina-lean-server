@@ -1,5 +1,44 @@
 # LeanFoundry
-## Full System Design — v10
+## Full System Design — v11
+
+> **v11.1 (2026-06-17):** Clarifications from an interface walkthrough, folded
+> into the gaps and deployment sections (no architectural change):
+> - **G2** is a *label-representation* gap (the durable schema cannot encode
+>   disproved-vs-censored, so the bit is lost at write time), distinct from the
+>   *weight* of a censored negative, which is the tunable in R3.
+> - **G3**'s `TacticNode` tree is **not** a second live structure. It is a
+>   projection *extracted* from the live AND/OR search graph for one solved
+>   slice at data-emission time. Two custom classes are required: the AND/OR
+>   search graph (the live engine) and the small `TacticNode` tree (the
+>   serialized/rendered proof). See §3.1 and A.5.
+> - **G4** only bites the flywheel path: cold-start extracted data (LeanDojo/
+>   LeanTree) carries no model-authored inline comments; comments are produced
+>   by the policy *during search*, and the gap is "do not strip them at record
+>   time." Honoring it now is free.
+> - **G5** is gated **per-theorem on provenance** (`TheoremSpec.source`, already
+>   present as `theorems.source`): default **off** for known-true targets
+>   (leandojo/mathlib/minif2f), turned **on** for autoformalized and speculative-
+>   decomposition statements where falseness is plausible. A Lean proof *state*
+>   holds a *list* of goals; OR is over candidate actions, AND is over the
+>   subgoals one action produces — the single-goal restriction exists because
+>   `¬P` is only a clean action when there is one goal. See §3.5.1.
+> - **Deployment**: the **Docker image is the prioritized path** (it seals the
+>   Lean toolchain + Mathlib build, the real cost). `lean_client.launch_server`
+>   only works inside this monorepo and is dev-only; downstream LeanFoundry runs
+>   the server out-of-band and connects over HTTP. `connect()` round-trips
+>   `GET /exec/limits` (and rejects unbounded caps), which doubles as the
+>   connectivity check before any work. See Development Workflow.
+
+> **v11 (2026-06-17):** Adds Part V / Extension D — a controlled algorithm
+> ablation study (whole-proof outcome-only training vs. search-as-discovery
+> vs. search-with-shaped-credit, MCGS+HER+value) run under a frozen
+> theorem-to-round curriculum and a compute-matched evaluation design. This
+> is additive and decoupled: Stages 2-4 of the core training pipeline keep
+> their existing dynamic frontier filtering and adaptive exit criteria
+> unchanged, as the production "how far can we go" recipe. Extension D is a
+> separate, smaller-scale study that answers a different question — which
+> algorithm produces a better prover at matched compute, and why — using its
+> own frozen buckets and its own arms. See §25-32.
 
 > **v10 (2026-06-09):** §2 reconciled with the shipped `/exec` backend —
 > structured `goals` (`GoalInfo`) and `messages` (`ExecMessage`), per-result
@@ -57,6 +96,8 @@ The current `TheoremSpec` has no field for a pre-built Lean code block with sorr
 **G2 — state_value_labels does not distinguish disproved from censored negative.**
 A state marked DISPROVED via negation pruning is definitively mathematically false — label=0 at full weight. A state searched but not proved is a censored negative — reduced weight because "not found by this policy" is not the same as false. The current schema has one `label` field with a single comment. Fix: add `disproved BOOLEAN DEFAULT FALSE`; update value training to assign full weight to disproved states and reduced weight to censored states.
 
+This is a *representation* gap, not a reward-shaping choice. The value model is trained supervised on `(label, weight)` pairs; with a single `label` field, the disproved-vs-censored distinction is destroyed at write time and is unrecoverable from the durable spine (P3). The actual *weight* given to a censored negative (0.25?) is a separate, tunable shaping question tracked in R3 — but no weighting scheme can be applied later unless the `disproved` bit was recorded when the label was written. G2 is the structural prerequisite; R3 is the downstream knob.
+
 **G3 — tactic_sequence in trajectories is a flat list, but AND-split proofs are trees.**
 After a `cases` or `constructor` tactic producing multiple subgoals, the proof is a branching tree. A flat list of `(state, tactic)` pairs cannot represent this structure and cannot reconstruct Lean's branching syntax (`case inl =>`, `case inr =>`). The canonical representation must be a `TacticNode` tree:
 ```python
@@ -68,11 +109,31 @@ class TacticNode:
 ```
 Depth-first traversal yields flat `(state, tactic)` pairs for policy SFT. Any proved subtree is a HER candidate. `rendered_lean` reconstructed from tactic history is the canonical text for final verification. Fix: update `trajectories.tactic_sequence` to store a serialized `TacticNode` tree; update HER extraction and policy SFT data generation to use tree traversal.
 
+This does **not** mean maintaining a second live structure in parallel with the search graph. There are two distinct structures with two distinct lifetimes, and both are custom (no off-the-shelf library provides them):
+
+1. **The live AND/OR search graph** — the engine's working structure (OR over a state's candidate actions, AND over the subgoals one action produces; a DAG once MCGS merging is on). It holds *everything*: dead branches, failed tactics, censored states, visit counts, value estimates. It is checkpointed to disk only for operational resume (P10); it is not training data. This is a substantial custom class — the heart of the Search Engine.
+
+2. **The serialized `TacticNode` tree** — a *projection* extracted from the solved slice of the search graph at data-emission time, then written to `trajectories.tactic_sequence`. It is trivially custom (the 3-field dataclass above). A tree, not the graph, because (a) rendering to Lean text is inherently tree-shaped (`case inl => … case inr => …`), and (b) HER's "every proved *subtree* is a candidate" is only well-defined on a tree — a merged DAG node has several parents and no unambiguous subtree.
+
+So G3 is: one extraction/unfold pass from graph → tree at write time, plus changing the schema field from a lossy flat list to the serialized tree. The flat list is only adequate for purely linear proofs; the first goal-splitting tactic breaks it.
+
 **G4 — Inline comments must be preserved in tactic SFT data.**
 Aristotle's policy generates (hidden CoT) + (inline comment) + (tactic). Inline comments persist in the action history and serve as external persistent memory — future calls to the policy see the earlier reasoning context embedded in the proof. If SFT data strips comments from action strings, the model never learns to produce them and loses this mechanism. Fix: ensure the action string recorded in trajectories includes the full text the model generated, comments included. The prompt builder in the training repo must reconstruct the full prefix including comments for policy training.
 
+Scope note: comments do not exist in cold-start extracted data (LeanDojo/LeanTree proofs are human/extracted and carry no model-authored CoT comments), so G4 has no effect on Stage 1 SFT from those sources. Comments are produced by *our own policy* during search, only once it is prompted Aristotle-style to emit them; G4 is therefore a constraint on the *trajectory-recording* path of the flywheel (Stages 2+): record the model's full output verbatim so comments survive into the next round's SFT. Honoring it costs nothing now and is inert until commented generation is enabled (whether the base model emits useful comments at cold-start is a separate recipe question, adjacent to R5).
+
 **G5 — Negation pruning is not in the current search plan.**
-For each single-goal state `⊢ P`, a synthetic action should be added to the pool: prove `¬P` in the same local context. This action competes under normal UCB selection and receives a full sub-search — not a one-step check. If it succeeds, the state is marked DISPROVED and "dead" propagates upward through all parent AND-nodes, immediately eliminating them. This is Aristotle's hard-termination mechanism. Without it, provably-false subgoals are only abandoned via budget exhaustion. Fix: add negation augmentation as an optional flag in SearchEngine expansion (`try_negation: bool`, default False). Enable for harder targets; evaluate cost/benefit on LeanDojo traces before making it default.
+For each single-goal state `⊢ P`, a synthetic action should be added to the pool: prove `¬P` in the same local context. This action competes under normal UCB selection and receives a full sub-search — not a one-step check. If it succeeds, the state is marked DISPROVED and "dead" propagates upward through all parent AND-nodes, immediately eliminating them. This is Aristotle's hard-termination mechanism. Without it, provably-false subgoals are only abandoned via budget exhaustion. Fix: add negation augmentation as an optional flag in SearchEngine expansion (`try_negation: bool`, default False). Enable per-theorem by provenance (below); evaluate cost/benefit on traces before changing any default.
+
+Semantics, to avoid two common confusions:
+- A Lean proof *state* holds a **list** of goals, not one (wire type `goals: list[GoalInfo]`). After `constructor` on `A ∧ B`, one state carries `⊢ A` and `⊢ B`. Whether to split a multi-goal state into separate nodes is a *search-engine* decision (the AND-split), and per the LeanTree lesson (§3.1) metavariable-coupled goals are **not** split — so multi-goal nodes do occur. The synthetic action is restricted to single-goal states because `¬P` is only a clean single action when there is exactly one goal `P`.
+- The negation is an extra entry in the state's **OR** action pool (a state is proved if *any* action proves it). A tactic never produces "OR goals": the subgoals one tactic produces are conjunctive (**AND** — all must close). OR is over *which action you choose*; AND is over *the subgoals an action spawns*.
+
+Provenance gating (per-theorem, not global): `try_negation` defaults **False** and is set by the SearchEngine from `TheoremSpec.source` (carried from the existing `theorems.source` column — see §4.2):
+- **Off** for known-true targets (`leandojo`, `mathlib`, `minif2f`): every subgoal of a true theorem is itself true, so trying to disprove subgoals mostly wastes budget (and `¬P` is a *full sub-search*, retried under UCB, not one cheap step).
+- **On** for `autoformalized` statements and speculative subgoal-decomposition lemmas: these can be genuinely false, and negation is how search auto-rejects wrong statements / bad decompositions. This is central to the Extension B autoformalization flywheel — but it is a *pruning* accelerator; the flywheel's engine remains HER + pass-rate bucketing.
+
+So `TheoremSpec` must carry `source` (propagated from `theorems.source`); the engine maps source → `try_negation`. No new persisted column is required — the provenance label already exists in the data spine; it just needs to reach the in-memory spec. See R4 for the cost/benefit unknown that keeps this off by default for the LeanDojo core, and §3.5.1 for the mechanism.
 
 ---
 
@@ -167,7 +228,7 @@ eval framework are the net-new open infrastructure.
 
 ## Extensions and Roadmap
 
-This document describes one fully designed core system and two explicitly
+This document describes one fully designed core system and four explicitly
 scoped extensions. Understanding the boundaries between them is important
 for planning implementation work.
 
@@ -200,6 +261,28 @@ design decisions depend on empirical results from training runs.
 
 Trigger: model has plateaued on LeanDojo novel_premises split, and data
 diversity (not compute) is the limiting factor.
+
+### Extension C: Test-Time Training Module (Part V, §21-24)
+> **Status: Design sketch. Implement after core system is stable.**
+
+Per-problem LoRA fine-tuning on search traces found during inference,
+for olympiad-level targets with no other training signal. Evaluation-time
+only; does not replace or modify Stages 1-4.
+
+### Extension D: Controlled Algorithm Ablation Study (Part V, §25-32)
+> **Status: Design sketch. Run after Stage 1 checkpoint and a hygiene-
+> passed curated pool exist. Does not modify Stages 2-4.**
+
+Holds base checkpoint, theorem-to-round curriculum, and total compute
+fixed, and varies only the training algorithm (outcome-only whole-proof
+EI, search-as-discovery-only, search-with-shaped-credit/MCGS+HER+value),
+to answer which algorithm produces a better prover and why — a question
+the production pipeline's adaptive, dynamically-filtered recipe (Stages
+2-4) is not designed to answer, since its frontier and exit criteria
+move with the live policy rather than staying fixed across arms.
+
+Trigger: Stage 1 cold-start checkpoint exists and is stable; runs
+alongside, not instead of, the core pipeline's own Stage 2-4 progression.
 
 ---
 
@@ -1196,7 +1279,19 @@ def extract_value_labels(
 
 ### 3.5.1 Negation Pruning (try_negation flag, default False)
 
-> See concern G5. Not yet implemented. Enable per-theorem for harder targets.
+> See concern G5. Not yet implemented. Gated per-theorem by provenance, not
+> globally: the SearchEngine sets `try_negation` from `TheoremSpec.source` —
+> off for known-true targets (`leandojo`/`mathlib`/`minif2f`), on for
+> `autoformalized` and speculative-decomposition statements where the goal may
+> be genuinely false. Restricted to single-goal states (a Lean state may hold
+> multiple goals; `¬P` is a clean action only when there is one).
+
+```python
+def should_try_negation(spec: TheoremSpec) -> bool:
+    # provenance label already lives in theorems.source (§4.2);
+    # TheoremSpec carries it through to the engine.
+    return spec.source in {"autoformalized"}   # extend per Extension B / decomposition
+```
 
 For each new single-goal state with goal `⊢ P`, a synthetic action is added
 to the state's action pool: prove `¬P` (i.e., `P → False`) in the same local
@@ -1395,6 +1490,8 @@ CREATE TABLE theorems (
   pass_rate_updated_at TIMESTAMP,
   source TEXT NOT NULL,          -- 'leandojo', 'minif2f', 'autoformalized',
                                  --   'math', 'amc', 'aime', 'numina'
+                                 -- provenance; propagated into TheoremSpec.source
+                                 --   and gates try_negation (see G5 / §3.5.1)
   split TEXT DEFAULT 'train',    -- 'train', 'val', 'test'
   added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -2766,27 +2863,49 @@ becoming the release story.
 
 ### Development Workflow
 
-```
-Dev mode:
-  Training repo has optional git submodule or sibling checkout at
-  third_party/lean-agent-infra.
-  The training repo depends on lean-client from the backend repo's
-  packages/lean-client subdirectory by pinned SHA.
-  Developers run the backend app from source as a separate process with uv:
-    uv sync --dev
-    uv run python -m server
-  or run the server's Docker image. Either way the server is a separate
-  process; LeanFoundry connects to its URL and never imports server modules.
-  (lean_client.launch_server exists only as a dev convenience for scripts that
-  want to spawn that process; it is not used in normal operation.)
-  No Python package publish/install step is required for the server during
-  backend development.
+The **Docker image is the prioritized deployment path** for both dev and
+release: it seals the expensive part (Lean toolchain via `setup.sh` + the
+Mathlib build + the server's own venv) and exposes only an HTTP port, so the
+consumer's environment needs nothing but the `lean-client` package. The
+`Dockerfile` already defaults `LEAN_SERVER_MODE=exec` and `CMD python -m server`;
+`compose.yaml` runs it. The real cost of standing up a server is the Lean/Mathlib
+build, never Python packaging — which is exactly why it should never live inside
+the consumer process.
 
-Release mode:
-  Server deployment is via Docker image with pinned infra SHA and env_profile.
-  The `lean-client` package is pinned by git SHA or tag and is the only
-  Python dependency downstream repos import from this backend repo.
+Three ways to run the server, ranked:
+
 ```
+1. Docker image (preferred, dev + release):
+     docker run -e LEAN_SERVER_MODE=exec -e LEAN_SERVER_MAX_REPLS=8 \
+       -p 8000:8000 projectnumina/kimina-lean-server:<tag>     # or: docker compose up
+   Consumer venv holds only lean-client; zero shared environment.
+   Release: pin the image by infra SHA + env_profile.
+
+2. Server checkout with its own venv (when Docker is unavailable):
+     uv sync --dev && uv run python -m server --workers 8 --port 8000
+   A separate server-side environment (server deps + built Mathlib) and a
+   separate process on its own host/container. LeanFoundry connects to the URL
+   and never imports server modules.
+
+3. lean_client.launch_server (dev-only, monorepo-bound):
+   subprocess-spawns `python -m server`, so it only resolves when the target
+   interpreter already has the server package (true in THIS monorepo, false for
+   a downstream repo that pip-installed only lean-client). Not part of the
+   stable consumer contract.
+```
+
+> **Current local state (2026-06-17):** only the `Dockerfile` exists in-repo —
+> there is no pre-built image, and Docker is not installed on the dev machine.
+> So local work uses option 2 (`uv run python -m server` from this checkout);
+> building/pulling the image is the first step before treating Docker as the
+> default. The consumer always reaches the server over HTTP regardless of which
+> option launched it.
+
+In all cases the training repo depends on `lean-client` (from
+`packages/lean-client`, pinned by git SHA/tag) as its only Python import from
+this backend repo; no server package publish/install is required downstream.
+`connect()` round-trips `GET /exec/limits` (rejecting unbounded caps), which is
+also the connectivity check before any real work.
 
 ---
 
@@ -3251,6 +3370,235 @@ TTT results are not folded back into the main A-type training set without
 careful deduplication and env_profile verification. Search traces from TTT
 sessions may be used to expand B-type data for future training iterations,
 but this requires the same provenance tracking as any external data.
+
+---
+
+# Part V: [EXTENSION D] Controlled Algorithm Ablation Study
+> **Status: Design sketch. Run after Stage 1 checkpoint and a hygiene-
+> passed curated pool exist. This Part is additive — it does not change
+> Stages 2-4, their dynamic frontier filtering, or their adaptive exit
+> criteria. Those remain the production "how far can we go" recipe.
+> Extension D answers a different, narrower question under its own
+> frozen conditions, run alongside the core pipeline rather than
+> replacing any part of it.**
+
+## 25. Motivation and Relationship to the Core Pipeline
+
+Stages 2-4 are optimized for one thing: maximize solved@budget on the
+held-out splits, by any combination of whole-proof EI, MCTS EI, and GRPO,
+with the frontier and exit criteria adapting to the live policy at every
+iteration. That design question is "how far can we go." It is deliberately
+not a controlled comparison — Stage 3's queue is defined as Stage 2's
+leftovers, exit criteria are adaptive, and nothing about the pipeline holds
+still long enough to isolate why a given combination works.
+
+Extension D asks a different question: holding the base checkpoint, the
+theorem-to-round assignment, and total compute fixed, which training
+algorithm produces a better prover, and through which mechanism? This
+requires arms that do NOT adapt their own curriculum or escalate
+their own queues — the opposite of what makes Stages 2-4 effective in
+production. Hence a separate Part, a separate frozen curriculum, and
+its own smaller-scale arms, rather than instrumentation bolted onto the
+core pipeline.
+
+Three camps, not two, motivate the arm design below:
+
+```
+Camp 1 — outcome-only:
+  whole-proof EI / RL. Training target is "did the whole proof verify."
+  No search at any stage, including data collection.
+
+Camp 2 — search-as-discovery-only:
+  search (best-first or MCGS) finds proofs that direct sampling cannot,
+  but the training target stays flat — same as Camp 1, just on a better
+  set of discovered proofs. No value loss, no HER-derived auxiliary
+  samples feed the gradient. This is closest to BFS-Prover and to
+  DeepSeek-Prover-V1.5's RMaxTS-for-data-collection role.
+
+Camp 3 — search-with-shaped-credit:
+  MCGS + value function + HER (Stage 3's own mechanics, §3.2-3.5),
+  where the tree structure itself produces additional training signal
+  beyond "proof found" — value labels on every searched state, HER
+  subproofs from unsolved roots. This is what Stage 3 already does by
+  default; Extension D evaluates it as one controlled arm among several
+  rather than as the production escalation tier.
+```
+
+Camp 1 vs. Camp 2 isolates whether better proof *discovery* explains an
+improvement. Camp 2 vs. Camp 3 isolates whether shaped credit assignment
+adds anything beyond discovery quality. Conflating these (comparing Camp 1
+directly to Camp 3, as most published comparisons do) cannot tell you
+which mechanism is responsible for any observed gap.
+
+## 26. Frozen Curriculum
+
+Stage 2/3/4's dynamic pass_rate-based filtering is left exactly as
+specified in §7 for the production pipeline. Extension D defines a
+**separate, frozen** curriculum used only by its own arms:
+
+```
+1. From the shared Stage 1 checkpoint, compute whole-proof pass@N
+   (fixed N, e.g. 32) once for every theorem in the curated pool.
+
+2. Assign each theorem to a difficulty bucket and a training round
+   from that single pass@N pass. Freeze this assignment.
+
+3. Every arm in Extension D trains on the identical theorem-to-round
+   mapping for every round. Only the algorithm applied to that fixed
+   set varies between arms.
+```
+
+This is the fix for the coupling problem in the production pipeline:
+there, Stage 3's queue is defined as Stage 2's pass_rate=0 leftovers, so
+"what a given stage trains on" depends on what earlier stages already
+did. That dependency is a feature for "how far can we go" and a confound
+for a controlled comparison. Extension D removes it by construction, at
+the cost of not adapting — which is exactly the cost that makes it
+unsuitable as a replacement for Stages 2-4.
+
+## 27. Algorithm Arms
+
+```
+Arm W       — whole-proof EI only (§7 Stage 2 mechanics, no Stage 3
+              escalation, frozen curriculum). Camp 1.
+
+Arm W+SC    — Arm W, plus self-correction (Format 3: failed proof +
+              Lean errors → revision). Still a flat outcome-only
+              target. Camp 1, with one round of real compiler feedback.
+
+Arm S-disc  — MCGS search (§3.2-3.3) finds proofs per the frozen
+              curriculum; train ONLY on found whole-proof and
+              tactic-sequence pairs. No value loss term. No HER
+              extraction. Isolates discovery quality from shaped
+              credit assignment. Camp 2.
+
+Arm S-noval — Best-first search, no value model, ranking by policy
+              probability only (BFS-Prover-style). Isolates whether a
+              learned value function specifically matters within
+              search, independent of HER. Camp 2 variant.
+
+Arm S-full  — Full Stage 3 mechanics (§3.2-3.5): MCGS, value function,
+              HER, under the frozen curriculum instead of the dynamic
+              pass_rate=0 queue. Camp 3.
+```
+
+Arms are seeded from the identical Stage 1 checkpoint. None of them
+feed into or modify the production Stage 2-4 pipeline's own state;
+each Extension D arm keeps its own replay buffer and checkpoint
+lineage.
+
+## 28. Compute Ledger and Budget Enforcement
+
+Three meters, tracked per arm per round:
+
+```
+generation: prefill + decode tokens (SGLang), convertible to FLOPs
+training:   tokens through the optimizer (Megatron)
+verifier:   per-request Lean CPU-seconds and wall time, from /exec
+            diagnostics — measured on the worker, excluding queue wait
+```
+
+Every request and policy call carries a `budget_account_id`; a metering
+service decrements the per-cell budget and refuses requests once
+exhausted. This is enforcement, not just measurement — without hard
+caps, the search arms can silently overspend relative to Arm W and the
+comparison stops being interpretable.
+
+For cross-architecture pass@K reporting, adopt DeepSeek-Prover-V1.5's
+budget-alignment convention as the primary axis: K = total proofs
+generated for single-pass arms (W, W+SC), K = N×S×T for best-first
+search (attempts × tactics per expansion × expansion iterations,
+S-noval), K = N×T for tree search (attempts × model generations
+invoked, S-disc and S-full). Report the three-ledger breakdown
+secondarily — invocation counts alone hide the cost of macro-tactics
+(`aesop`, `nlinarith`, `simp_all`), which can each absorb a single
+"node" worth of K while consuming a highly variable amount of actual
+Lean CPU time. Log macro-tactic call rate per arm as a covariate for
+this reason.
+
+## 29. Crossed Evaluation Design
+
+Evaluating each arm only in its native inference mode confounds
+"did this training algorithm produce a better core policy" with "does
+this inference protocol help regardless of how the policy was trained."
+Because a whole-proof attempt is just a sequence of tactics, any
+whole-proof-trained arm can be wrapped in post-hoc external search at
+inference by truncating at tactic boundaries and resuming search from
+the resulting state — this is exactly DeepSeek-Prover-V1.5's
+truncate-and-resume mechanism for RMaxTS, applied here as an evaluation
+tool rather than a training-time method. Symmetrically, a search-trained
+arm can be run single-shot by sampling from its policy head and ignoring
+the value head and tree apparatus entirely.
+
+```
+                    eval: native            eval: cross-wrapped
+Arm W           |   single-shot pass@K   |  + post-hoc search wrapper
+Arm W+SC        |   self-correct pass@K  |  + post-hoc search wrapper
+Arm S-disc      |   MCGS solved@budget   |  single-shot from policy head
+Arm S-noval     |   BFS solved@budget    |  single-shot from policy head
+Arm S-full      |   MCGS solved@budget   |  single-shot from policy head
+```
+
+Diagonal cells are the deployment-relevant numbers: this training
+recipe, deployed in its own native mode, at matched budget. Off-diagonal
+cells isolate mechanism. DeepSeek-Prover-V1.5's own published RMaxTS
+result (whole-proof-RL policy + search wrapper: 60.2% → 63.5% on
+miniF2F) is a useful external sanity-check reference for the Arm
+W / cross-wrapped cell before trusting this study's own numbers.
+
+All results are stratified by required-proof-length / difficulty bucket
+(from the frozen §26 assignment). The predicted result is a
+difficulty-dependent crossover, not a uniform ranking: outcome-only
+arms (W, W+SC) are expected to match or beat the search arms on short
+proofs, where direct sampling already succeeds often enough to get
+nonzero reward, and to lag increasingly on long, compositional proofs,
+where outcome-only reward is exactly zero until the model can already
+nearly solve the whole thing — while Arm S-full's value labels and HER
+subproofs give nonzero training signal on theorems it never fully
+solves. Arm S-disc sitting between Arm W and Arm S-full on long proofs
+would indicate the gap is mostly about discovery quality; Arm S-disc
+tracking Arm W instead would indicate the gap is mostly about shaped
+credit assignment.
+
+## 30. Hygiene Defaults for the Curated Pool
+
+Any autoformalized statement entering this study's pool must already
+have passed Extension B's standard promotion gate plus the negation
+check (`try_negation`, §3.5.1 / concern G5) before being added: attempt
+the negation, and retire or relabel any statement that proves false or
+that double-proves (both the statement and its negation succeed,
+indicating a vacuous/inconsistent hypothesis set) before promotion to
+this study's frozen pool. This is a pool-construction requirement
+applied once, upstream of Extension D, not a variable under test here.
+Extension D's arms are compared on training algorithm; statement-level
+contamination tolerance is a separate, already-settled question and
+should not be allowed to vary uncontrolled across arms by accident.
+
+## 31. Outcome Variables
+
+```
+held-out solved@budget per ledger unit, stratified by difficulty bucket
+compute-to-asymptote (shift) vs. final asymptote, per arm
+macro-tactic call rate per arm (covariate for K-alignment, not an outcome)
+value AUC / calibration error (S-disc, S-noval, S-full only)
+HER rescue rate: fraction of unsolved-root search sessions yielding
+  at least one verified subproof (S-disc and S-full, for comparison)
+```
+
+## 32. Scope
+
+Run the full 5-arm × difficulty-stratified matrix at a smaller model
+size than the production §5.2 base model, given compute constraints;
+confirm the headline crossover (Arm W vs. Arm S-full, on the longest
+difficulty bucket) at full scale only for the cell(s) that matter most
+once the smaller-scale results are in. Two to three seeds on headline
+cells; single-seed acceptable for the remaining diagnostic arms (S-disc,
+S-noval) given their role is mechanism isolation, not the topline claim.
+
+This Part does not modify Stage 1's checkpoint, Stage 2-4's mechanics,
+or the production pipeline's own replay buffer and exit criteria in
+any way. It is a separate study that reads the same Stage 1 checkpoint
+and the same hygiene-passed pool, and writes to its own buffers.
 
 ---
 
