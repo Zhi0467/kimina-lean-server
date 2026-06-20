@@ -238,6 +238,65 @@ async def test_goal_focusing_suspends_siblings(
     assert focused[0].status == "complete"
 
 
+async def test_goal_group_resumes_exact_subset(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    # ``(∃ n, n = n) ∧ True`` after ``constructor; apply Exists.intro`` yields a
+    # mixed state: goal 0 (``?w = ?w``) is metavariable-coupled to goal 1 (the
+    # ``Nat`` witness); goal 2 (``True``) is independent. ``goal_group`` resumes
+    # an exact subset, which neither ``auto_resume`` mode can express.
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t : (∃ n : Nat, n = n) ∧ True := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    after_constructor = await pantograph_worker.step_state_with_tactics(
+        created.states[0].path, ["constructor"], state_dir=tmp_path
+    )
+    after_intro = await pantograph_worker.step_state_with_tactics(
+        after_constructor[0].state_path,
+        ["apply Exists.intro"],
+        state_dir=tmp_path,
+    )
+    mixed = after_intro[0]
+    assert [goal.sibling_dep for goal in mixed.goals] == [[1], [], []]
+
+    # The coupled cluster [0, 1] resumes exactly those two goals; the
+    # independent ``True`` (index 2) is excluded.
+    cluster = await pantograph_worker.step_state_with_tactics(
+        mixed.state_path, ["skip"], state_dir=tmp_path, goal_group=[0, 1]
+    )
+    assert cluster[0].status == "open"
+    cluster_targets = [goal.target for goal in cluster[0].goals]
+    assert len(cluster_targets) == 2
+    assert "True" not in cluster_targets
+    assert "Nat" in cluster_targets
+
+    # The independent goal [2] resumes only ``True``; ``trivial`` closes it.
+    independent = await pantograph_worker.step_state_with_tactics(
+        mixed.state_path, ["trivial"], state_dir=tmp_path, goal_group=[2]
+    )
+    assert independent[0].status == "complete"
+
+
+async def test_goal_group_rejects_out_of_range_index(
+    pantograph_worker: PantographWorker,
+    tmp_path: Path,
+) -> None:
+    created = await pantograph_worker.create_states_from_code(
+        "theorem t (n : Nat) : n + 0 = n := by\n  sorry",
+        state_dir=tmp_path,
+    )
+    result = await pantograph_worker.step_state_with_tactics(
+        created.states[0].path,
+        ["rfl"],
+        state_dir=tmp_path,
+        goal_group=[5],
+    )
+    assert result[0].status == "error"
+    assert "out of range" in result[0].messages[0].data
+
+
 async def test_is_alive_tracks_subprocess_state(
     pantograph_worker: PantographWorker,
 ) -> None:

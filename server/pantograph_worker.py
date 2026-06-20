@@ -10,7 +10,10 @@ from typing import Any, TypeVar, cast
 
 import pantograph  # pyright: ignore[reportMissingTypeStubs]
 import psutil
-from pantograph.expr import Site  # pyright: ignore[reportMissingTypeStubs]
+from pantograph.expr import (  # pyright: ignore[reportMissingTypeStubs]
+    GoalState,
+    Site,
+)
 
 from .pantograph_goal import PantographGoal
 from .pantograph_normalize import (
@@ -37,6 +40,19 @@ def _empty_messages() -> list[ExecMessage]:
 
 def _empty_goals() -> list[PantographGoal]:
     return []
+
+
+def _validate_goal_group(goal_group: list[int], goal_count: int) -> None:
+    if not goal_group:
+        raise ValueError("goal_group must be non-empty")
+    if len(set(goal_group)) != len(goal_group):
+        raise ValueError("goal_group indices must be unique")
+    for index in goal_group:
+        if index < 0 or index >= goal_count:
+            raise ValueError(
+                f"goal_group index {index} out of range "
+                f"for {goal_count} goals"
+            )
 
 
 @dataclass(frozen=True)
@@ -155,6 +171,7 @@ class PantographWorker:
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        goal_group: list[int] | None = None,
         debug: bool = False,
     ) -> list[PantographStepResult]:
         if debug:
@@ -165,6 +182,7 @@ class PantographWorker:
                     state_dir=state_dir,
                     goal_id=goal_id,
                     auto_resume=auto_resume,
+                    goal_group=goal_group,
                 )
             )
         return await self._step_state_with_tactics(
@@ -173,6 +191,7 @@ class PantographWorker:
             state_dir=state_dir,
             goal_id=goal_id,
             auto_resume=auto_resume,
+            goal_group=goal_group,
         )
 
     async def _step_state_with_tactics(
@@ -183,10 +202,25 @@ class PantographWorker:
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        goal_group: list[int] | None = None,
     ) -> list[PantographStepResult]:
         state_dir.mkdir(parents=True, exist_ok=True)
         try:
             parent_state = await self._server.goal_load_async(str(state_path))
+            if goal_group is not None:
+                # Resume exactly this goal subset as one focused subtree, then
+                # step it whole-state. ``Site`` focusing cannot express a goal
+                # subset (``auto_resume`` drags or suspends ALL siblings), so
+                # this is the only sound way to split independent subgoals.
+                _validate_goal_group(goal_group, len(parent_state.goals))
+                parent_state = await self._resume_goal_group(
+                    parent_state, goal_group
+                )
+                site = Site()
+            else:
+                # ``Site()`` (both fields None) serialises to ``{}`` and is the
+                # legacy whole-state step; a ``goal_id`` focuses one goal.
+                site = Site(goal_id=goal_id, auto_resume=auto_resume)
         except Exception as exc:
             messages = exception_to_exec_messages(exc)
             return [
@@ -198,11 +232,6 @@ class PantographWorker:
                 for tactic in tactics
             ]
 
-        # ``Site()`` (both fields None) serialises to ``{}`` and is therefore
-        # identical to the legacy whole-state step; passing a ``goal_id`` (with
-        # ``auto_resume=False``) focuses that goal and suspends its siblings even
-        # in automatic mode, yielding an undragged single-goal subtree.
-        site = Site(goal_id=goal_id, auto_resume=auto_resume)
         results: list[PantographStepResult] = []
         for tactic in tactics:
             results.append(
@@ -211,6 +240,29 @@ class PantographWorker:
                 )
             )
         return results
+
+    async def _resume_goal_group(
+        self,
+        parent_state: Any,
+        goal_group: list[int],
+    ) -> Any:
+        # PyPantograph's ``goal_resume_async`` sends ``goal.name`` (the
+        # user-facing case label, often ``None``) instead of ``goal.id`` (the
+        # internal metavariable id), so call ``goal.continue`` directly with the
+        # ids resolved fresh from the loaded state.
+        target_ids = [parent_state.goals[index].id for index in goal_group]
+        result = await self._server.run_async(
+            "goal.continue",
+            {"target": parent_state.state_id, "goals": target_ids},
+        )
+        for error_key in ("error", "tacticErrors", "parseError"):
+            if error_key in result:
+                raise RuntimeError(
+                    f"goal.continue failed: {result[error_key]!r}"
+                )
+        return GoalState.parse(  # pyright: ignore[reportUnknownMemberType]
+            result, [], self._server.to_remove_goal_states
+        )
 
     async def verify_complete_proof(
         self,

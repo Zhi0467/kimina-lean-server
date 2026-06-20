@@ -23,7 +23,9 @@ def _write_state(path: Path, data: bytes = b"state") -> Path:
 
 @dataclass
 class _FakeWorker:
-    step_calls: list[tuple[Path, list[str]]] = field(default_factory=list)
+    step_calls: list[tuple[Path, list[str], list[int] | None]] = field(
+        default_factory=list
+    )
     timeout_seconds: int | None = None
     agc_calls: int = 0
 
@@ -38,10 +40,11 @@ class _FakeWorker:
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        goal_group: list[int] | None = None,
         debug: bool = False,
     ) -> list[PantographStepResult]:
         _ = debug
-        self.step_calls.append((state_path, list(tactics)))
+        self.step_calls.append((state_path, list(tactics), goal_group))
         return [
             PantographStepResult(tactic=tactic, status="complete")
             for tactic in tactics
@@ -78,10 +81,11 @@ class _BlockingWorker(_FakeWorker):
         state_dir: Path,
         goal_id: int | None = None,
         auto_resume: bool | None = None,
+        goal_group: list[int] | None = None,
         debug: bool = False,
     ) -> list[PantographStepResult]:
         _ = debug
-        self.step_calls.append((state_path, list(tactics)))
+        self.step_calls.append((state_path, list(tactics), goal_group))
         self.started.set()
         await self.release.wait()
         if self.result_status == "open":
@@ -216,6 +220,42 @@ async def test_process_pool_reuses_one_worker_for_single_lane(tmp_path: Path) ->
         0,
     ]
 
+    await manager.cleanup()
+
+
+async def test_step_batch_forwards_goal_group_to_worker(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "store")
+    header = "import Init"
+    token = store.put(
+        _write_state(tmp_path / "state.bin"),
+        item_id="item_0",
+        env_profile="env",
+        header=header,
+        header_hash=header_hash(header),
+    )
+    factory = _FakeWorkerFactory()
+    lifecycle = ItemLifecycleRegistry()
+    manager = PantographManager(max_workers=1, worker_factory=factory)
+
+    await execute_step_batch_request(
+        StepBatchRequest(
+            items=[
+                StepBatchItem(
+                    node_id="item_0:n0",
+                    state_token=token,
+                    tactics=["rfl"],
+                    goal_group=[0, 1],
+                    timeout_ms=1000,
+                )
+            ]
+        ),
+        state_store=store,
+        pantograph_manager=manager,
+        lifecycle=lifecycle,
+        config=_config(max_lanes=1),
+    )
+
+    assert factory.workers[0].step_calls[0][2] == [0, 1]
     await manager.cleanup()
 
 

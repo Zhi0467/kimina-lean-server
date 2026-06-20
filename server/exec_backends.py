@@ -262,6 +262,7 @@ async def _run_process_pool_lane(
                     state_dir=state_store.root_dir,
                     goal_id=resolved_item.item.goal_id,
                     auto_resume=resolved_item.item.auto_resume,
+                    goal_group=resolved_item.item.goal_group,
                     debug=resolved_item.item.debug,
                 )
                 diagnostics = _diagnostics(

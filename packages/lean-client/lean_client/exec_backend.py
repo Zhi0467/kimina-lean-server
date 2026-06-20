@@ -136,6 +136,7 @@ class AsyncLeanExecBackend:
         timeout_ms: int | None = None,
         acquire_timeout_ms: int | None = None,
         step_timeout_ms: int | None = None,
+        goal_group: list[int] | None = None,
     ) -> ExecStepBatchResult:
         return await self.batcher.submit_step(
             node_id,
@@ -144,6 +145,7 @@ class AsyncLeanExecBackend:
             timeout_ms=timeout_ms,
             acquire_timeout_ms=acquire_timeout_ms,
             step_timeout_ms=step_timeout_ms,
+            goal_group=goal_group,
         )
 
     async def step_batch(

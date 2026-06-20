@@ -91,6 +91,7 @@ class AsyncLeanExecEnv:
         timeout_ms: int | None = None,
         acquire_timeout_ms: int | None = None,
         step_timeout_ms: int | None = None,
+        goal_group: list[int] | None = None,
     ) -> ExecStepBatchResult:
         response = await self.step_batch(
             [
@@ -98,6 +99,7 @@ class AsyncLeanExecEnv:
                     node_id=node_id,
                     state_token=state_token,
                     tactics=tactics,
+                    goal_group=goal_group,
                     acquire_timeout_ms=(
                         acquire_timeout_ms or timeout_ms or self.acquire_timeout_ms
                     ),
@@ -314,11 +316,13 @@ class AsyncLeanExecBatcher:
         timeout_ms: int | None = None,
         acquire_timeout_ms: int | None = None,
         step_timeout_ms: int | None = None,
+        goal_group: list[int] | None = None,
     ) -> ExecStepBatchResult:
         item = ExecStepBatchItem(
             node_id=node_id,
             state_token=state_token,
             tactics=tactics,
+            goal_group=goal_group,
             acquire_timeout_ms=(
                 acquire_timeout_ms or timeout_ms or self.env.acquire_timeout_ms
             ),

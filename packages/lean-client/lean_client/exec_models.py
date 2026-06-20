@@ -136,12 +136,21 @@ class ExecStepBatchItem(_TimeoutItem):
     node_id: str = Field(min_length=1)
     state_token: str = Field(min_length=1)
     tactics: list[str] = Field(min_length=1)
-    # Optional per-item goal focusing. ``goal_id`` with ``auto_resume=False``
-    # applies every tactic to that goal with its siblings suspended; both unset
-    # ⇒ legacy whole-state step. ``auto_resume`` is meaningful only with a
-    # ``goal_id`` (enforced below).
+    # Optional per-item goal focusing; all three unset ⇒ legacy whole-state
+    # step. Single-goal focus via ``Site`` (``goal_id``/``auto_resume``) cannot
+    # express "focus this goal subset only" (verified live):
+    #   ``auto_resume=True``  → keeps ALL other in-scope goals (drags unrelated
+    #                           siblings, not just metavariable-coupled ones);
+    #   ``auto_resume=False`` → suspends ALL siblings, including coupled ones.
+    # For an exact goal subset use ``goal_group`` (below), which resumes that
+    # subset via Pantograph ``goal.continue``.
     goal_id: int | None = Field(default=None, ge=0)
     auto_resume: bool | None = None
+    # Public goal indices (positions in the state's goal list) to resume as one
+    # focused subtree. Mutually exclusive with ``goal_id``/``auto_resume``. The
+    # worker resolves indices to internal metavariable ids at step time, so the
+    # indices only need to match the order the state's goals were reported in.
+    goal_group: list[int] | None = None
 
     @model_validator(mode="after")
     def validate_goal_focus(self) -> "ExecStepBatchItem":
@@ -151,6 +160,17 @@ class ExecStepBatchItem(_TimeoutItem):
         # (``True``) while diverging from the wire-identical legacy step.
         if self.auto_resume is not None and self.goal_id is None:
             raise ValueError("auto_resume requires goal_id")
+        if self.goal_group is not None:
+            if self.goal_id is not None or self.auto_resume is not None:
+                raise ValueError(
+                    "goal_group is mutually exclusive with goal_id/auto_resume"
+                )
+            if len(self.goal_group) == 0:
+                raise ValueError("goal_group must be non-empty")
+            if any(index < 0 for index in self.goal_group):
+                raise ValueError("goal_group indices must be non-negative")
+            if len(set(self.goal_group)) != len(self.goal_group):
+                raise ValueError("goal_group indices must be unique")
         return self
 
 
