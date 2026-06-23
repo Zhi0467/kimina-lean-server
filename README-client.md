@@ -120,11 +120,13 @@ server from the consumer repo.
 
 Important launch defaults:
 
-- `workers` controls `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS`.
+- `workers` controls `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS`; by default it is
+  sized from CPU count and a conservative free-node memory budget.
 - `max_lean_processes_per_env_profile` defaults to `workers`.
 - `recommended_items_per_step_batch` defaults to `workers`.
-- `max_in_flight_exec_requests` defaults to `8`.
-- `max_queued_exec_requests` defaults to `32`.
+- `max_in_flight_exec_requests` defaults to `min(workers, 8)`.
+- `max_queued_exec_requests` defaults to `min(4 * max_in_flight, 32)`, with a
+  floor of `4`.
 - `max_state_store_bytes` defaults to `16 * 2**30`.
 - `single_process` defaults to `True`.
 

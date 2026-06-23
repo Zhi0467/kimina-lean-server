@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from server._exec_server_cli import parse_exec_server_config, settings_from_cli_args
-from server.exec_server_config import ExecServerConfig
+from server.exec_server_config import ExecServerConfig, default_exec_worker_count
 from server.settings import Settings
 
 
@@ -12,8 +12,8 @@ def test_settings_pool_dependent_defaults_follow_pantograph_workers() -> None:
 
     assert settings.max_lean_processes_per_env_profile == 3
     assert settings.recommended_items_per_step_batch == 3
-    assert settings.max_in_flight_exec_requests == 8
-    assert settings.max_queued_exec_requests == 32
+    assert settings.max_in_flight_exec_requests == 3
+    assert settings.max_queued_exec_requests == 12
     assert settings.max_state_store_bytes == 16 * 2**30
     assert settings.recommended_in_flight_step_batches == 8
     assert settings.single_process is True
@@ -41,6 +41,28 @@ def test_exec_server_config_maps_to_settings() -> None:
     assert settings.max_step_timeout_ms == 800_000
     assert settings.max_in_flight_exec_requests == 6
     assert settings.max_queued_exec_requests == 24
+
+
+def test_default_worker_count_uses_conservative_free_node_capacity() -> None:
+    capacity = 755 * 2**30
+
+    assert (
+        default_exec_worker_count(
+            cpu_count=256,
+            memory_capacity_bytes=capacity,
+        )
+        == 60
+    )
+
+
+def test_default_worker_count_keeps_at_least_one_worker() -> None:
+    assert (
+        default_exec_worker_count(
+            cpu_count=256,
+            memory_capacity_bytes=16 * 2**30,
+        )
+        == 1
+    )
 
 
 def test_exec_server_config_refuses_unbounded_without_opt_in() -> None:
@@ -146,3 +168,5 @@ def test_python_module_cli_workers_updates_dependent_defaults(
     assert settings.max_pantograph_workers == 6
     assert settings.max_lean_processes_per_env_profile == 6
     assert settings.recommended_items_per_step_batch == 6
+    assert settings.max_in_flight_exec_requests == 6
+    assert settings.max_queued_exec_requests == 24

@@ -75,6 +75,12 @@ docker run --rm \
   kimina-lean-server:local
 ```
 
+The app binds `0.0.0.0` inside the container. Docker `-p 8000:8000` publishes
+container port `8000` to host port `8000`, so a process on the same host, such
+as a LeanFoundry search engine outside the container, should connect to
+`http://127.0.0.1:8000`. A process on another machine must use the node's
+reachable host/IP and whatever firewall or scheduler port publishing applies.
+
 Smoke-test the running container:
 
 ```sh
@@ -141,10 +147,10 @@ production controls are:
 | `LEAN_SERVER_LEAN_VERSION` | `v4.29.1` | Lean toolchain label used by the server. |
 | `LEAN_SERVER_PROJECT_DIR` | `mathlib4` | Lean project path; Docker sets `/mathlib4`. |
 | `LEAN_SERVER_REPL_PATH` | `repl/.lake/build/bin/repl` | Legacy verify-mode REPL binary path. |
-| `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS` | CPU count - 1 | Total `/exec` Lean worker count. |
+| `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS` | memory-aware worker count | Total `/exec` Lean worker count; default caps CPU count by a conservative free-node memory budget: half of total/cgroup memory minus 16 GiB headroom, divided by about 6 GiB per warmed Mathlib worker. |
 | `LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE` | worker count | Per-env-profile worker lane cap. |
-| `LEAN_SERVER_MAX_IN_FLIGHT_EXEC_REQUESTS` | `8` | Global admitted `/exec` HTTP requests. |
-| `LEAN_SERVER_MAX_QUEUED_EXEC_REQUESTS` | `32` | Global queued `/exec` requests before 503 backpressure. |
+| `LEAN_SERVER_MAX_IN_FLIGHT_EXEC_REQUESTS` | `min(worker count, 8)` | Global admitted `/exec` HTTP requests. |
+| `LEAN_SERVER_MAX_QUEUED_EXEC_REQUESTS` | `min(4 * in-flight, 32)` | Global queued `/exec` requests before 503 backpressure. |
 | `LEAN_SERVER_MAX_STATE_STORE_BYTES` | `17179869184` | State-store disk budget. |
 | `LEAN_SERVER_ALLOW_UNBOUNDED_EXEC` | `false` | Must be true to permit any `-1` exec cap. |
 | `LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH` | worker count | Client batch-width recommendation exposed by `/exec/limits`. |

@@ -35,16 +35,16 @@ process) per server is the default we size for.
 
 Items running concurrently ≈ `(requests in flight) × (items per request)`, and
 that competes for N workers. To keep the pool fed you target a small multiple of
-N. **Width and count are substitutes — scale only ONE of them with the pool.**
-We scale **width**; the counts stay small constants. Scaling both double-counts
-and over-subscribes.
+N. **Width and count are substitutes.** We scale **width** with the pool and keep
+request counts bounded by small caps. On small pools, admission count shrinks to
+avoid over-subscribing one or two workers.
 
 ## Server admission (enforced)
 
 | Setting | Old | New | Meaning |
 |---|---|---|---|
-| `max_in_flight_exec_requests` | `-1` | **8** | Global concurrent requests; 503 over. Single client ⇒ equals the client's in-flight. |
-| `max_queued_exec_requests` | `-1` | **32** (`4×`) | Backlog admitted before 503. Mostly a buffer for bursts / raw (non-cooperative) HTTP callers. |
+| `max_in_flight_exec_requests` | `-1` | **min(N, 8)** | Global concurrent requests; 503 over. Single client ⇒ equals the client's in-flight. |
+| `max_queued_exec_requests` | `-1` | **min(4× in-flight, 32)**, floor 4 | Backlog admitted before 503. Mostly a buffer for bursts / raw (non-cooperative) HTTP callers. |
 | `max_state_store_bytes` | `-1` | **16 GiB** | Disk budget for state files (GC backstop beyond the TTL). |
 | `allow_unbounded_exec` | — | **False** | Must be `True` to permit any `-1` cap. |
 
@@ -113,10 +113,10 @@ LeanFoundry should not import server internals. The launch contract is:
 ## Final defaults
 
 ```
-max_pantograph_workers              = cpu - 1            (= N)
+max_pantograph_workers              = memory-aware N
 max_lean_processes_per_env_profile  = N                  (was 4)
-max_in_flight_exec_requests         = 8                  (was -1)
-max_queued_exec_requests            = 32                 (was -1)
+max_in_flight_exec_requests         = min(N, 8)          (was -1)
+max_queued_exec_requests            = min(4*inflight,32) (was -1)
 max_state_store_bytes               = 16 * 2**30         (was -1)
 allow_unbounded_exec                = False
 max_acquire_timeout_ms              = 600_000            (unchanged)

@@ -4,14 +4,16 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from ._exec_server_config_utils import (
-    DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS,
-    DEFAULT_MAX_QUEUED_EXEC_REQUESTS,
     DEFAULT_MAX_STATE_STORE_BYTES,
     DEFAULT_RECOMMENDED_IN_FLIGHT_STEP_BATCHES,
+    ExecSafetyConfig,
     append_cli_option,
     default_exec_worker_count,
+    default_max_in_flight_exec_requests,
+    default_max_queued_exec_requests,
     validate_bounded_exec_caps,
 )
 
@@ -32,8 +34,8 @@ class ExecServerConfig:
     max_acquire_timeout_ms: int = 600_000
     max_step_timeout_ms: int = 600_000
 
-    max_in_flight_exec_requests: int = DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS
-    max_queued_exec_requests: int = DEFAULT_MAX_QUEUED_EXEC_REQUESTS
+    max_in_flight_exec_requests: int | None = None
+    max_queued_exec_requests: int | None = None
     max_state_store_bytes: int = DEFAULT_MAX_STATE_STORE_BYTES
     allow_unbounded_exec: bool = False
 
@@ -57,6 +59,20 @@ class ExecServerConfig:
                 self,
                 "recommended_items_per_step_batch",
                 self.workers,
+            )
+        if self.max_in_flight_exec_requests is None:
+            object.__setattr__(
+                self,
+                "max_in_flight_exec_requests",
+                default_max_in_flight_exec_requests(self.workers),
+            )
+        if self.max_queued_exec_requests is None:
+            object.__setattr__(
+                self,
+                "max_queued_exec_requests",
+                default_max_queued_exec_requests(
+                    _required_int(self.max_in_flight_exec_requests)
+                ),
             )
         _validate_positive("port", self.port)
         _validate_positive("workers", self.workers)
@@ -84,7 +100,7 @@ class ExecServerConfig:
             "recommended_in_flight_step_batches",
             self.recommended_in_flight_step_batches,
         )
-        validate_bounded_exec_caps(self)
+        validate_bounded_exec_caps(cast(ExecSafetyConfig, self))
 
     def to_cli_args(self) -> list[str]:
         args: list[str] = []
@@ -121,12 +137,12 @@ class ExecServerConfig:
         append_cli_option(
             args,
             "--max-in-flight-exec-requests",
-            self.max_in_flight_exec_requests,
+            _required_int(self.max_in_flight_exec_requests),
         )
         append_cli_option(
             args,
             "--max-queued-exec-requests",
-            self.max_queued_exec_requests,
+            _required_int(self.max_queued_exec_requests),
         )
         append_cli_option(args, "--max-state-store-bytes", self.max_state_store_bytes)
         if self.allow_unbounded_exec:

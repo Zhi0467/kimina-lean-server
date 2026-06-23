@@ -680,8 +680,8 @@ env_backend:
   max_lean_processes_per_env_profile: ${profiled_worker_pool_size}
   recommended_items_per_step_batch: ${profiled_worker_pool_size}
   recommended_in_flight_step_batches: 8
-  max_in_flight_exec_requests: 8
-  max_queued_exec_requests: 32
+  max_in_flight_exec_requests: ${min(profiled_worker_pool_size, 8)}
+  max_queued_exec_requests: ${min(4 * max_in_flight_exec_requests, 32)}
   max_state_store_bytes: 17179869184
   state_store_dir: "/dev/shm/leanfoundry-state"
   single_process: true

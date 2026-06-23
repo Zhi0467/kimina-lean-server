@@ -465,8 +465,8 @@ def test_exec_cancel_and_limits_routes_e2e(tmp_path: Path) -> None:
         payload = limits_response.json()
         assert payload["max_pantograph_workers"] == 1
         assert payload["max_lean_processes_per_env_profile"] == 1
-        assert payload["max_in_flight_exec_requests"] == 8
-        assert payload["max_queued_exec_requests"] == 32
+        assert payload["max_in_flight_exec_requests"] == 1
+        assert payload["max_queued_exec_requests"] == 4
         assert payload["max_state_store_bytes"] == 16 * 2**30
         assert payload["recommended_items_per_step_batch"] == 1
         assert payload["recommended_in_flight_step_batches"] == 8

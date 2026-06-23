@@ -8,11 +8,11 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .exec_server_config import (
-    DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS,
-    DEFAULT_MAX_QUEUED_EXEC_REQUESTS,
     DEFAULT_MAX_STATE_STORE_BYTES,
     DEFAULT_RECOMMENDED_IN_FLIGHT_STEP_BATCHES,
     default_exec_worker_count,
+    default_max_in_flight_exec_requests,
+    default_max_queued_exec_requests,
 )
 
 
@@ -31,6 +31,19 @@ def _copy_max_pantograph_workers(data: dict[str, object]) -> int:
     if isinstance(value, str):
         return int(value)
     raise TypeError("max_pantograph_workers must be an int")
+
+
+def _default_max_in_flight_exec_requests(data: dict[str, object]) -> int:
+    return default_max_in_flight_exec_requests(_copy_max_pantograph_workers(data))
+
+
+def _default_max_queued_exec_requests(data: dict[str, object]) -> int:
+    value = data["max_in_flight_exec_requests"]
+    if isinstance(value, int):
+        return default_max_queued_exec_requests(value)
+    if isinstance(value, str):
+        return default_max_queued_exec_requests(int(value))
+    raise TypeError("max_in_flight_exec_requests must be an int")
 
 
 class Settings(BaseSettings):
@@ -71,8 +84,12 @@ class Settings(BaseSettings):
     verify_allowed_axioms: list[str] = Field(
         default_factory=lambda: ["Classical.choice", "propext", "Quot.sound"]
     )
-    max_in_flight_exec_requests: int = DEFAULT_MAX_IN_FLIGHT_EXEC_REQUESTS
-    max_queued_exec_requests: int = DEFAULT_MAX_QUEUED_EXEC_REQUESTS
+    max_in_flight_exec_requests: int = Field(
+        default_factory=_default_max_in_flight_exec_requests
+    )
+    max_queued_exec_requests: int = Field(
+        default_factory=_default_max_queued_exec_requests
+    )
     allow_unbounded_exec: bool = False
     recommended_items_per_step_batch: int = Field(
         default_factory=_copy_max_pantograph_workers

@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 from typing import Any, Sequence
 
-from .exec_server_config import ExecServerConfig
+from .exec_server_config import (
+    ExecServerConfig,
+    default_max_in_flight_exec_requests,
+    default_max_queued_exec_requests,
+)
 from .settings import Settings
 
 
@@ -25,6 +29,14 @@ def settings_from_cli_args(argv: Sequence[str] | None = None) -> Settings:
             settings.max_lean_processes_per_env_profile = workers
         if "recommended_items_per_step_batch" not in values:
             settings.recommended_items_per_step_batch = workers
+        if "max_in_flight_exec_requests" not in values:
+            settings.max_in_flight_exec_requests = (
+                default_max_in_flight_exec_requests(workers)
+            )
+        if "max_queued_exec_requests" not in values:
+            settings.max_queued_exec_requests = default_max_queued_exec_requests(
+                settings.max_in_flight_exec_requests
+            )
     for key, value in values.items():
         setattr(settings, key, value)
     if mode is not None:
