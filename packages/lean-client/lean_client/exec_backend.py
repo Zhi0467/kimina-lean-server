@@ -23,8 +23,9 @@ from .exec_models import (
 class AsyncLeanExecBackend:
     """Single entry point for a consumer (search/RL) talking to a Lean ``/exec`` server.
 
-    This is the object a consumer such as LeanFoundry constructs and manages. It
-    owns the three internal layers so callers never juggle them directly:
+    This is the object an external proof-search or RL consumer constructs and
+    manages. It owns the three internal layers so callers never juggle them
+    directly:
 
     - :class:`AsyncKiminaClient` — HTTP transport (one method per endpoint),
     - :class:`AsyncLeanExecEnv` — proof-state vocabulary + default env_profile/timeouts,

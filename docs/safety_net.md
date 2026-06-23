@@ -99,7 +99,7 @@ process memory. Running more than one server process against one
 
 ## Programmatic launch interface
 
-LeanFoundry should not import server internals. The launch contract is:
+Downstream callers should not import server internals. The launch contract is:
 
 - Server side: `server.exec_server_config.ExecServerConfig` is the authoritative
   typed config and maps onto `Settings`.

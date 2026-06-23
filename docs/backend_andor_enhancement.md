@@ -1,20 +1,20 @@
 # Backend Enhancement: Structured Goals + AND/OR Independent-Subgoal Search
 
-Design notes for extending the `/exec` backend so the search engine
-(LeanFoundry / Aristotle) can run MCGS over an AND/OR hypergraph. Companion to
-`docs/canonical_search.md`. Principle: the **backend exposes capabilities,
-information, and soundness invariants; the AND/OR algorithm lives entirely in
-the search engine.**
+Design notes for the `/exec` backend capabilities that external search engines
+need for independent-subgoal search. This document is backend-only: the server
+exposes capabilities, information, and soundness invariants; graph search,
+policy calls, value calls, proof selection, and training logic live outside this
+repo.
 
-## The search model (recap, grounded in canonical_search.md)
+## External Search Model Recap
 
 - **State = OR-node** (a Lean proof state). Proved if ANY action succeeds.
 - **Action = AND-node** (a tactic). Succeeds only if ALL its resulting states
   are proved.
 - A tactic can produce multiple goals → AND-children.
-- **Split rule** (canonical_search.md line 218): goals split into independent
-  states **only if none share metavariables** (`sibling_dep` empty). Coupled
-  goals stay bundled as one OR-node (the policy focuses in-band).
+- **Split rule**: goals split into independent states **only if none share
+  metavariables** (`sibling_dep` empty). Coupled goals stay bundled as one
+  OR-node and the caller focuses in-band.
 - Node identity = *(goal exprs, local context, variable names)*; dedup across
   paths makes the tree a hypergraph (the "G" in MCGS).
 - Per-OR-node signal: a node is proved when its focused subgraph reaches zero
@@ -60,10 +60,10 @@ tokens.
 
 ## Backend ↔ search mapping (validated)
 
-How the PUCT/MCGS loop (canonical_search.md) uses the backend. The search
-algorithm — UCB over actions, LCB over AND-children, `AND = min` / `OR = max`
-value backup, status propagation, dedup — lives **entirely in the search
-engine**; the backend exposes only the primitives below.
+How an external PUCT/MCGS-style loop uses the backend. The search algorithm -
+UCB over actions, LCB over AND-children, `AND = min` / `OR = max` value backup,
+status propagation, and deduplication - lives **entirely in the caller**; the
+backend exposes only the primitives below.
 
 | Search operation | Backend primitive |
 |---|---|
@@ -74,9 +74,9 @@ engine**; the backend exposes only the primitives below.
 | **Solved leaf** of a focused subgraph | `status="complete"` / zero in-scope goals on that node |
 | **Final proof** once root PROVED | text-level: tactics along the proof subgraph → `/verify` |
 
-Value model runs on **state nodes**, not actions (canonical_search.md line 356):
-action values are search-side bookkeeping aggregated from child OR-node values.
-So the backend never needs an "action" or "value" concept — it returns states.
+Value models should run on **state nodes**, not backend action records: action
+values are caller-side bookkeeping aggregated from child OR-node values. So the
+backend never needs an "action" or "value" concept; it returns states.
 
 ## Design changes
 

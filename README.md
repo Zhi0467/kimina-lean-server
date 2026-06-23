@@ -103,7 +103,7 @@ variables when a shared node needs a smaller footprint.
 
 The app binds `0.0.0.0` inside the container. Docker `-p 8000:8000` publishes
 container port `8000` to host port `8000`, so a process on the same host, such
-as a LeanFoundry search engine outside the container, should connect to
+as a proof-search process outside the container, should connect to
 `http://127.0.0.1:8000`. A process on another machine must use the node's
 reachable host/IP and whatever firewall or scheduler port publishing applies. A
 client running in another container on the same Docker network should use the

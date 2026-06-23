@@ -51,7 +51,7 @@ when it is robust and safe under the production calling pattern:
   attempted.
 - Overload is explicit and retryable: pool contention returns `overloaded` or an
   HTTP overload response, never a tactic `error`.
-- The Python `EnvClient` is the reliable API LeanFoundry/SearchEngine calls; raw
+- The Python `EnvClient` is the reliable API external search engines call; raw
   `/exec` calls are lower-level and must still obey the same caps/lifecycle
   contract.
 - Metrics and logs are sufficient to prove the above in E2E and soak runs.
@@ -72,8 +72,8 @@ Trainer
   -> Pantograph/Lean process
 ```
 
-This repo defines the backend contract. LeanFoundry, SearchEngine, or any other
-caller may wrap it differently, but they must obey these `/exec` semantics:
+This repo defines the backend contract. Search engines or other callers may
+wrap it differently, but they must obey these `/exec` semantics:
 unique `item_id` per attempt, no same-`item_id` pipelining, microbatch-level
 resume, item-scoped cancel, and cleanup only after needed search/training records
 have been persisted or handed off.
@@ -1196,7 +1196,7 @@ Expected success signal:
 
 This proves load pressure is explicit backpressure, not corrupted proof signal.
 
-### Phase 4 Benchmark Gate: LeanFoundry EnvClient Reliability
+### Phase 4 Benchmark Gate: EnvClient Reliability
 
 Add:
 
@@ -1219,7 +1219,8 @@ Expected success signal:
   different attempts to run concurrently.
 - The client derives batch size and in-flight limits from `/exec/limits`.
 
-This is the first point where the Python EnvClient is LeanFoundry-reliable.
+This is the first point where the Python EnvClient is reliable for external
+search engines.
 
 ### Phase 5 Benchmark Gate: Observability Completeness
 
@@ -1286,7 +1287,7 @@ server-derived client limits, resumable client microbatching, stats access, and
 a real Goedel-derived create/step/cleanup run that returns StateStore usage to
 baseline. Larger `200 x 8` and `1024 split` runs remain scale/soak
 characterization before increasing deployment scale; they should not change the
-LeanFoundry-facing contract.
+external search-engine contract.
 
 Phase 2A is done only when:
 

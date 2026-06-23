@@ -22,8 +22,8 @@ The running FastAPI app serves API documentation at:
 - `exec-observability-plan.md` - exec diagnostics, timing fields, stats, and the
   `/exec/verify` certification path.
 - `safety_net.md` - server/client backpressure and `/exec/limits` guardrails.
-- `leanfoundry_system_design_v11.md` - downstream LeanFoundry design context and
-  the contract this server/client boundary supports.
+- `backend_andor_enhancement.md` - backend-only notes for structured goal
+  metadata and goal-targeted stepping. Search algorithms remain external.
 
 ## Diagnostics And Incident Notes
 
@@ -36,9 +36,6 @@ The running FastAPI app serves API documentation at:
 
 - `lean-task-backend-research.md` - in-process Lean task parallelism research;
   useful context, not the mainline backend implementation plan.
-- `backend_andor_enhancement.md` - AND/OR search-model enhancement notes.
-- `canonical_search.md` - canonical search framing used by downstream design
-  docs.
 
 ## Current Project Boundary
 
