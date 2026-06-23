@@ -1,315 +1,235 @@
-<h1 align="center">Kimina Lean Server</h1>
+# Kimina Lean Server Fork
 
-<p align="center">
-<b>Check Lean 4 code at scale ⚡️</b>
+This fork packages a Lean execution server for downstream search and RL
+systems. It has drifted from the upstream Kimina Lean Server shape in one
+important way:
 
-</p>
+- the server is deployed as an application process, normally a Docker image;
+- `packages/lean-client/` is the only vendored Python package downstream repos
+  should depend on;
+- the root `pyproject.toml` is a local development environment
+  (`tool.uv.package = false`), not a distributable server package.
 
-<p align="center">
-    <a href="https://projectnumina.ai/"><img alt="Project Numina" src="images/logo_projectNumina_light.png" style="height:20px; width:auto; vertical-align:middle; border-radius:4px;"></a>
-    <a href="https://github.com/project-numina/kimina-lean-server/actions/workflows/ci.yaml" rel="nofollow"><img alt="CI" src="https://github.com/project-numina/kimina-lean-server/actions/workflows/ci.yaml/badge.svg" style="max-width:100%;"></a>
-</p>
+The default server mode is `exec`, which serves the Pantograph-backed proof-state
+API under `/exec/*`. The legacy whole-file REPL checker still exists, but only
+when the server is started in `verify` mode.
 
-This local development checkout serves the
-[Lean REPL](https://github.com/leanprover-community/repl) using FastAPI.
-It supports parallelization to check Lean 4 proofs at scale.
+## Repository Layout
 
-Both the server code and local Python client live in this repository and are
-run directly from source with `uv`. The server is not installed as a packaged
-Python distribution in this development workflow.
+- `server/` - FastAPI server, mode gate, `/exec` routes, legacy verify routes,
+  Pantograph worker pool, state store, and runtime settings.
+- `packages/lean-client/` - packaged downstream client (`lean-client`) and shared
+  wire models.
+- `docs/` - design notes, backend plans, diagnostics notes, and research context.
+- `Dockerfile` - production server image build. It installs Lean/mathlib and runs
+  the app from the built virtualenv.
+- `compose.yaml` - local compose entrypoint for building/running the server
+  image.
 
-Read the [Technical Report](./Technical_Report.pdf) for more details.
+## Server Modes
 
-## Table of Contents
+`LEAN_SERVER_MODE=exec` is the default and production path for proof search. It
+mounts:
 
-- [Server](#server)
-- [Client](#client)
-- [Contributing](#contributing)
-- [License](#license)
-- [Citation](#citation)
+- `GET /health`
+- `POST /exec/create_states`
+- `POST /exec/step_batch`
+- `POST /exec/verify`
+- `POST /exec/cleanup`
+- `POST /exec/cancel`
+- `GET /exec/limits`
+- `GET /exec/stats`
 
-This repository contains the source code for:
-- the Kimina server
-- the Kimina client to interact with it
+`LEAN_SERVER_MODE=verify` is the legacy REPL mode. It mounts `/api/check`,
+`/verify`, and `/health`, and does not construct the Pantograph `/exec` pool.
 
-## Server
+Run one process per state-store ownership domain. The default
+`LEAN_SERVER_SINGLE_PROCESS=true` takes a lock under `LEAN_SERVER_STATE_STORE_DIR`
+to prevent two server processes from sharing one local state store.
 
-From a source checkout, use `uv` for the Python environment and run the
-server directly from the repository root:
+## Docker Server Image
+
+Build the server image from this checkout:
+
+```sh
+docker build -t kimina-lean-server:local .
+```
+
+The build runs `setup.sh`, installs Lean `v4.29.1`, downloads/builds mathlib, and
+generates the Prisma client. The legacy REPL is skipped by default because the
+default image is for `exec` mode. Build the REPL only for a verify-mode image:
+
+```sh
+docker build --build-arg SETUP_REPL=1 -t kimina-lean-server:verify .
+```
+
+Run a small exec-mode server:
+
+```sh
+docker run --rm \
+  --name kimina-lean-server \
+  -p 8000:8000 \
+  -e LEAN_SERVER_MAX_PANTOGRAPH_WORKERS=1 \
+  -e LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE=1 \
+  -e LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH=1 \
+  kimina-lean-server:local
+```
+
+Smoke-test the running container:
+
+```sh
+curl -fsS http://127.0.0.1:8000/health | jq
+curl -fsS http://127.0.0.1:8000/exec/limits | jq
+```
+
+Minimal proof-state smoke:
+
+```sh
+create=$(curl -fsS -X POST http://127.0.0.1:8000/exec/create_states \
+  -H "Content-Type: application/json" \
+  --data '{"env_profile":"default","items":[{"item_id":"docker-smoke","code":"theorem docker_smoke : True := by\n  sorry","acquire_timeout_ms":600000,"step_timeout_ms":600000}]}')
+
+token=$(echo "$create" | jq -r '.items[0].states[0].state_token')
+
+curl -fsS -X POST http://127.0.0.1:8000/exec/step_batch \
+  -H "Content-Type: application/json" \
+  --data "{\"items\":[{\"node_id\":\"docker-smoke:n0\",\"state_token\":\"$token\",\"tactics\":[\"trivial\"],\"acquire_timeout_ms\":600000,\"step_timeout_ms\":600000}]}" | jq
+```
+
+The image starts with `.venv/bin/python -m server`; it should not run `uv sync`
+at container startup.
+
+## Local Development
+
+From a fresh checkout:
+
 ```sh
 cp .env.template .env
 uv sync --dev
 uv run prisma generate
-bash setup.sh # Installs Lean and mathlib4 for the /exec Pantograph path
+bash setup.sh
 uv run python -m server
 ```
 
-> [!NOTE]
-> In this development checkout, the server is not treated as an installed
-> Python package. It is run from source with `uv run python -m server`.
-> Make sure `mathlib4` exists in the workspace directory before launching the
-> server. The legacy `/api/check` path also needs `repl`; build it with
-> `SETUP_REPL=1 bash setup.sh` if you need that path.
+`bash setup.sh` installs Lean and mathlib for the `/exec` path. To develop the
+legacy verify path as well:
 
-The `/exec` backend starts with finite safety caps by default:
-`max_in_flight_exec_requests=8`, `max_queued_exec_requests=32`, and
-`max_state_store_bytes=16 * 2**30`. Setting any of those caps to `-1` requires
-`allow_unbounded_exec=True`; otherwise the app refuses to boot. The server also
-defaults to `single_process=True` and takes a lock inside `state_store_dir`, so
-do not run multiple uvicorn workers or multiple server processes against the
-same state store.
+```sh
+SETUP_REPL=1 bash setup.sh
+LEAN_SERVER_MODE=verify uv run python -m server
+```
 
-`python -m server` accepts explicit app-launch flags for downstream job
-launchers:
+The module runner accepts app-launch flags used by local job launchers:
 
 ```sh
 uv run python -m server \
   --host 127.0.0.1 \
   --port 8000 \
   --workers 8 \
-  --state-store-dir /tmp/leanfoundry-state
+  --state-store-dir /tmp/kimina-lean-state
 ```
 
+Environment variables use the `LEAN_SERVER_` prefix. The most important
+production controls are:
 
-Or with `docker compose up`.
-Equivalent run command is:
-```sh
-docker run -d \
-  --name server \
-  --restart unless-stopped \
-  --env-file .env \
-  -p 80:${LEAN_SERVER_PORT} \
-  projectnumina/kimina-lean-server:2.0.0
-```
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LEAN_SERVER_MODE` | `exec` | `exec` for Pantograph `/exec`; `verify` for legacy REPL routes. |
+| `LEAN_SERVER_HOST` | `0.0.0.0` | Bind host. |
+| `LEAN_SERVER_PORT` | `8000` | Bind port. |
+| `LEAN_SERVER_ENVIRONMENT` | `dev` | `dev` or `prod`; Docker sets `prod`. |
+| `LEAN_SERVER_LEAN_VERSION` | `v4.29.1` | Lean toolchain label used by the server. |
+| `LEAN_SERVER_PROJECT_DIR` | `mathlib4` | Lean project path; Docker sets `/mathlib4`. |
+| `LEAN_SERVER_REPL_PATH` | `repl/.lake/build/bin/repl` | Legacy verify-mode REPL binary path. |
+| `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS` | CPU count - 1 | Total `/exec` Lean worker count. |
+| `LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE` | worker count | Per-env-profile worker lane cap. |
+| `LEAN_SERVER_MAX_IN_FLIGHT_EXEC_REQUESTS` | `8` | Global admitted `/exec` HTTP requests. |
+| `LEAN_SERVER_MAX_QUEUED_EXEC_REQUESTS` | `32` | Global queued `/exec` requests before 503 backpressure. |
+| `LEAN_SERVER_MAX_STATE_STORE_BYTES` | `17179869184` | State-store disk budget. |
+| `LEAN_SERVER_ALLOW_UNBOUNDED_EXEC` | `false` | Must be true to permit any `-1` exec cap. |
+| `LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH` | worker count | Client batch-width recommendation exposed by `/exec/limits`. |
+| `LEAN_SERVER_RECOMMENDED_IN_FLIGHT_STEP_BATCHES` | `8` | Client in-flight recommendation exposed by `/exec/limits`. |
+| `LEAN_SERVER_STATE_STORE_DIR` | `.leanfoundry-state` | Local state-token store. |
+| `LEAN_SERVER_SINGLE_PROCESS` | `true` | Lock the state store and fail fast on a second server process. |
+| `LEAN_SERVER_API_KEY` | unset | Optional bearer-token authentication. |
 
-To shut down the container / view logs:
+## Client Package
 
-```sh
-docker compose down
-docker compose logs -f
-```
-
-Build your own image with specific Lean version with:
-```sh
-docker build --build-arg=LEAN_SERVER_LEAN_VERSION=v4.21.0 .
-```
-
-Test it works with a request:
-
-```sh
-curl --request POST \
-  --url http://localhost:8000/verify \
-  --header 'Content-Type: application/json' \
-  --data '{
-    "codes": [
-      {
-        "custom_id": "1234",
-        "proof": "#check Nat"
-      }
-    ],
-    "infotree_type": "original"
-}' | jq
-```
-
-Or use the client below.
-
-## Client
-
-The client lives in its own versioned package, `packages/lean-client/`
-(distribution name `lean-client`), wired in as a uv workspace member. From
-this repo it is importable as `lean_client` via `uv run`; a downstream repo
-depends on it directly, e.g.
+Downstream repos should depend on `lean-client`, not on `server`.
 
 ```toml
 [project]
 dependencies = ["lean-client"]
 
 [tool.uv.sources]
-lean-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
+lean-client = { git = "https://github.com/Zhi0467/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
 ```
 
-For whole-code checking:
+Exec-mode proof search code should use the high-level backend facade:
 
 ```python
-from lean_client import KiminaClient
-client = KiminaClient() # Defaults to "http://localhost:8000", no API key
-client.check("#check Nat")
-```
+from lean_client import AsyncLeanExecBackend
 
-For LeanFoundry-style proof-state search, the downstream repo should import the
-client package only. It does not import server internals or know how workers are
-implemented:
-
-```python
-from lean_client import AsyncKiminaClient, AsyncLeanExecBatcher, AsyncLeanExecEnv
-
-async with AsyncKiminaClient(api_url="http://localhost:8000") as client:
-    env = AsyncLeanExecEnv(client, env_profile="lean_init_test")
-    batcher = await AsyncLeanExecBatcher.from_server_limits(env)
-    created = await env.create_states("attempt-1", "theorem t : True := by\n  sorry")
+async with await AsyncLeanExecBackend.connect(
+    "http://localhost:8000", env_profile="default"
+) as backend:
+    created = await backend.create_states(
+        "attempt-1",
+        "theorem t : True := by\n  sorry",
+    )
     state_token = created.items[0].states[0].state_token
-    result = await batcher.submit_step("attempt-1:n0", state_token, ["trivial"])
+    stepped = await backend.step("attempt-1:n0", state_token, ["trivial"])
 ```
 
-If a downstream job needs to start the app process itself, use the client-side
-launcher mirror. The launcher uses only stdlib `subprocess`; `server_python`
-points at the server checkout's virtualenv.
+See [README-client.md](./README-client.md) for the client boundary, launch
+helper, and legacy verify-mode notes.
 
-```python
-from lean_client import ExecServerConfig, launch_server
+## Tests
 
-cfg = ExecServerConfig(
-    host="127.0.0.1",
-    port=8000,
-    workers=8,
-    state_store_dir="/tmp/leanfoundry-state",
-)
-process = launch_server(cfg, server_python="/path/to/server/.venv/bin/python")
-```
-
-See [README-client.md](./README-client.md) for the full client boundary and
-`/exec` examples.
-
-## ⚙️ Environment Variables
-
-| Variable                              | Default       | Description                                            |
-| ------------------------------------- | ------------- | ------------------------------------------------------ |
-| `LEAN_SERVER_HOST`                    | `0.0.0.0`     | Host address to bind the server                        |
-| `LEAN_SERVER_PORT`                    | `8000`        | Port number for the server                             |
-| `LEAN_SERVER_LOG_LEVEL`               | `INFO`        | Logging level (`DEBUG`, `INFO`, `ERROR`, etc.)         |
-| `LEAN_SERVER_ENVIRONMENT`             | `dev`         | Environment `dev` or `prod`                            |
-| `LEAN_SERVER_LEAN_VERSION`            | `v4.29.1`     | Lean version                                           |
-| `LEAN_SERVER_MAX_REPLS`               | CPU count - 1 | Maximum number of REPLs                                |
-| `LEAN_SERVER_MAX_REPL_USES`           | `-1`          | Maximum number of uses per REPL (-1 is no limit)       |
-| `LEAN_SERVER_MAX_REPL_MEM`            | `8G`          | Maximum memory limit for each REPL (Linux-only)        |
-| `LEAN_SERVER_MAX_WAIT`                | `60`          | Maximum wait time to wait for a REPL (in seconds)      |
-| `LEAN_SERVER_INIT_REPLS`              | `{}`          | Map of header to REPL count to initialize with         |
-| `LEAN_SERVER_API_KEY`                 | `None`        | Optional API key for authentication                    |
-| `LEAN_SERVER_REPL_PATH`               | `repl/.lake/build/bin/repl` | Path to REPL directory, relative to workspace    |
-| `LEAN_SERVER_PROJECT_DIR`             | `mathlib4`    | Path to Lean 4 project directory, relative to workspace        |
-| `LEAN_SERVER_DATABASE_URL`            |               | URL for the database (if using one)                   |
-| `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS`  | CPU count - 1 | Total `/exec` Pantograph Lean worker process count     |
-| `LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE` | same as `MAX_PANTOGRAPH_WORKERS` | Per-env-profile worker cap and per-request lane cap |
-| `LEAN_SERVER_MAX_IN_FLIGHT_EXEC_REQUESTS` | `8`       | Global concurrent admitted `/exec` HTTP requests       |
-| `LEAN_SERVER_MAX_QUEUED_EXEC_REQUESTS` | `32`        | Global queued `/exec` requests before 503 backpressure |
-| `LEAN_SERVER_MAX_STATE_STORE_BYTES`   | `17179869184` | State-store disk budget before GC backstop             |
-| `LEAN_SERVER_ALLOW_UNBOUNDED_EXEC`    | `false`       | Must be true to permit any `-1` safety cap             |
-| `LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH` | same as `MAX_PANTOGRAPH_WORKERS` | `/exec/limits` request-width recommendation |
-| `LEAN_SERVER_RECOMMENDED_IN_FLIGHT_STEP_BATCHES` | `8` | `/exec/limits` per-client in-flight recommendation     |
-| `LEAN_SERVER_SINGLE_PROCESS`          | `true`        | Lock `state_store_dir` and fail fast on a second server |
-
-`LEAN_SERVER_MAX_REPL_MEM` can help avoid certain OOM issues (see Issue #25)
-The server also runs all commands with `"gc": true` to automatically discard environments which helps limit memory usage.
-
-
-
-## 🚀 Performance Benchmarks
-
-You can run benchmarks with the Kimina client on any HuggingFace dataset: the benchmark run expects `id` and `code` columns in
-the dataset, but you can select your own column names.
-
-Example with [Goedel-LM/Lean-workbook-proofs](https://huggingface.co/datasets/Goedel-LM/Lean-workbook-proofs):
-```python
-from lean_client import KiminaClient
-
-client = KiminaClient()
-client.run_benchmark(dataset_name="Goedel-LM/Lean-workbook-proofs", 
-                     n=1000,
-                     batch_size=8,
-                     max_workers=10)
-```
-
-If running benchmarks using the synchronous client (`KiminaClient` instead of `AsyncKiminaClient`) from an end-user computer, you may face the following error:
-
-> tenacity.before_sleep:log_it:65 - Retrying **main**.KiminaClient.\_query.<locals>.query_with_retries in 10.0 seconds as it raised ClientConnectorError: Cannot connect to host 127.0.0.1:80 ssl:default [Too many open files].
-
-This happens when you set a number of `max_workers` greater than the allowed number of TCP connections on your machine. 
-The synchronous client could not reliably make use of the same connection across threads, so each worker has its session. 
-
-You can check the maximum number of open files on your machine with `ulimit -n` (256 on a MacBook Pro). It may be smaller than what's needed to run the benchmark: increase it with `ulimit -n 4096`.
-
-Alternatively, you can use the asynchronous client `AsyncKiminaClient` which uses a single session and can handle more workers without running into this issue.
-
-### Benchmark reports
-
-Without REPL reuse:
-![Benchmark Results without REPL reuse](images/benchmark_results_reuse_false.png)
-
-With REPL reuse:
-![Benchmark Results with REPL reuse](images/benchmark_results_reuse_true.png)
-
-**Note**:
-
-The benchmarks were run on a machine with **10 CPUs** (MacBook Pro M2) with the above command and default parameters.
-The dataset is available at [`Goedel-LM/Lean-workbook-proofs`](https://huggingface.co/datasets/Goedel-LM/Lean-workbook-proofs). 
-
-To reproduce:
-- Server command: `uv run python -m server` (no `.env` file)
-- Client (from ipython / Jupyter notebook or `python -m asyncio`):
-```python
-from lean_client import AsyncKiminaClient
-client = AsyncKiminaClient() # defaults to "http://localhost:8000", no API key
-
-# Add `reuse=False` to prevent REPL reuse across requests
-await client.run_benchmark(dataset_name="Goedel-LM/Lean-workbook-proofs", n=1000)
-```
-
-## Contributing
-
-Contributions are welcome 🤗, just open an issue or submit a pull request.
-
-To contribute, ensure you have Astral's [uv](https://docs.astral.sh/uv/) installed and:
+Generate Prisma once in a fresh local virtualenv:
 
 ```sh
-uv run pre-commit install
+uv run prisma generate
 ```
 
-On commit, the hooks:
-- run `ruff`, `pyright` and `mypy`
-- enforce [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/). 
+Run the normal test suite:
 
-`mypy` was slow against the `client` directory, so I excluded it in the pre-commit config, therefore also on the CI. 
-You can still run `mypy` manually to check. 
-
-An additional hook runs basic tests on push.
-
-> [!TIP]
-> Use `--no-verify` to skip hooks on commit / push (but the CI runs them).
-
-
-Install [Lean 4](https://github.com/leanprover/lean4) and build [mathlib4](https://github.com/leanprover-community/mathlib4) for the `/exec` Pantograph path:
-```sh
-bash setup.sh
-```
-
-The legacy `/api/check` path uses the Lean REPL binary. Build it only when
-needed with `SETUP_REPL=1 bash setup.sh`.
-
-Run tests with (reads your `LEAN_SERVER_API_KEY` so make sure that line is commented):
 ```sh
 uv run pytest
+```
 
-# Performance tests on first rows of Goedel (ensures less than 10s average check time per proof)
+The default pytest markers skip performance, match, and REPL integration tests.
+Run those explicitly when needed:
+
+```sh
 uv run pytest -m perfs
-
-# Tests on 100 first Goedel rows to validate API backward-compatibility
-uv run pytest -m match # Use -n auto to use all cores.
+uv run pytest -m match
+SETUP_REPL=1 bash setup.sh
+uv run pytest -m verify
 ```
 
-## License
+For Docker changes, build the image and run the smoke commands in
+[Docker Server Image](#docker-server-image).
 
-This project is licensed under the MIT License.
-You are free to use, modify, and distribute this software with proper attribution. See the [LICENSE](./LICENSE) file for full details.
+## Docs
 
-## Citation
-```
+Start with [docs/README.md](./docs/README.md). The running FastAPI app also
+serves Swagger at `/docs`, ReDoc at `/redoc`, and OpenAPI JSON at
+`/api/openapi.json`.
+
+## Attribution
+
+This fork is derived from Project Numina's Kimina Lean Server and keeps the MIT
+license. The original technical report remains useful background:
+
+```bibtex
 @misc{santos2025kiminaleanservertechnical,
-      title={Kimina Lean Server: Technical Report}, 
+      title={Kimina Lean Server: Technical Report},
       author={Marco Dos Santos and Haiming Wang and Hugues de Saxcé and Ran Wang and Mantas Baksys and Mert Unsal and Junqi Liu and Zhengying Liu and Jia Li},
       year={2025},
       eprint={2504.21230},
       archivePrefix={arXiv},
       primaryClass={cs.LO},
-      url={https://arxiv.org/abs/2504.21230}, 
+      url={https://arxiv.org/abs/2504.21230},
 }
 ```

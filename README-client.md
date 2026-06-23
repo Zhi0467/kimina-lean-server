@@ -1,55 +1,41 @@
-# Kimina client
+# lean-client
 
-`lean-client` is the downstream-facing Python package for Kimina Lean Server.
-It exposes stable client-side APIs for Lean checking and `/exec` proof-state
-execution. A repo such as LeanFoundry should depend on this package and avoid
-importing server modules such as `server.settings`, `server.main`, or
-`server.exec_backends`.
+`lean-client` is the downstream-facing Python package for this fork. It contains
+HTTP clients, shared wire models, and a search-oriented `/exec` backend facade.
+It does not package or import the server implementation.
 
-## Install from another repo
+Downstream repos should treat the server as a separate process or container and
+hold only its URL.
 
-For a uv-managed downstream repo, depend on the package subdirectory:
+## Install From This Fork
+
+For a uv-managed repo:
 
 ```toml
 [project]
-dependencies = [
-    "lean-client",
-]
+dependencies = ["lean-client"]
 
 [tool.uv.sources]
-lean-client = { git = "https://github.com/project-numina/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
+lean-client = { git = "https://github.com/Zhi0467/kimina-lean-server", subdirectory = "packages/lean-client", rev = "<pinned-sha-or-tag>" }
 ```
 
-The server app is not imported by the downstream repo. Deploy or launch it as
-an app process, then pass its URL to `AsyncKiminaClient`.
+Use a pinned commit or tag. The root repo is a development workspace; the
+subdirectory is the package boundary.
 
-## Whole-code checking
+## Exec Backend
 
-```python
-from lean_client import KiminaClient
+Use `AsyncLeanExecBackend` for proof-state search. It owns:
 
-# Defaults to LEAN_SERVER_API_URL or http://localhost:8000.
-client = KiminaClient()
-client.check("#check Nat")
-```
-
-## Exec environment client
-
-LeanFoundry/SearchEngine code should talk to the search-facing exec backend
-instead of hand-writing `/exec` JSON. The server runs as a **separate process**
-(its Docker image or `python -m server` from a checkout); the client only
-connects to it over HTTP.
-
-`AsyncLeanExecBackend` is the single entry point — one object that owns the HTTP
-client, the proof-state env wrapper, and the step batcher. Construct it with
-`connect()` (which reads `/exec/limits` to size batching) and use it as an async
-context manager.
+- an `AsyncKiminaClient` HTTP session;
+- an `AsyncLeanExecEnv` proof-state wrapper;
+- an `AsyncLeanExecBatcher` sized from `GET /exec/limits`.
 
 ```python
 from lean_client import AsyncLeanExecBackend
 
 async with await AsyncLeanExecBackend.connect(
-    "http://localhost:8000", env_profile="lean_init_test"
+    "http://localhost:8000",
+    env_profile="default",
 ) as backend:
     created = await backend.create_states(
         "run_123:theorem_42:attempt_1",
@@ -57,13 +43,13 @@ async with await AsyncLeanExecBackend.connect(
     )
     state_token = created.items[0].states[0].state_token
 
-    stepped = await backend.step(                    # coalesced into /exec/step_batch
+    stepped = await backend.step(
         "run_123:theorem_42:attempt_1:n0",
         state_token,
         ["simp", "rw [Nat.add_comm]"],
     )
 
-    verdict = await backend.verify_one(              # warm-pool proof certification
+    verdict = await backend.verify_one(
         "run_123:theorem_42:attempt_1",
         "theorem t (n : Nat) : n + 0 = n := by simp",
         "t",
@@ -72,27 +58,43 @@ async with await AsyncLeanExecBackend.connect(
     await backend.cleanup(["run_123:theorem_42:attempt_1"])
 ```
 
-Use one unique `item_id` per search attempt; a `node_id` should carry enough
-caller-side identity to map the response back to the proof graph. `step` derives
-request width and in-flight limits from `/exec/limits`, serializes live requests
-for the same `item_id`, retries observed `overloaded` results, and refuses a
-server that advertises unbounded safety caps. The composed layers remain
-available as `backend.client` / `backend.env` / `backend.batcher` for escape
-hatches; routine search code should not need them.
+Use one unique `item_id` per search attempt. A `node_id` should carry enough
+caller-side identity to map a result back to the proof graph. `step` coalesces
+requests into `/exec/step_batch`, serializes live requests for the same
+`item_id`, retries observed `overloaded` results, and refuses servers that
+advertise unbounded safety caps.
 
-## Programmatic server launch (dev convenience only)
+The composed layers remain available as `backend.client`, `backend.env`, and
+`backend.batcher` for escape hatches, but routine search code should use the
+facade.
 
-> The supported deployment runs the server as its **own process** — its Docker
-> image, or `python -m server` from a checkout — reached over HTTP. The helper
-> below is a dev/test convenience for spawning that process from a script; it
-> requires the `server` checkout to be importable in `server_python`'s
-> environment and is **not** how a consumer like LeanFoundry runs in production
-> (there the server is a separate container/process and the client holds only its
-> URL).
+## Direct Client Calls
 
-Some downstream workflows want a vLLM-style "start the service for this job"
-knob while keeping the downstream repo oblivious to server internals. Use the
-client-side launch mirror:
+Lower-level calls are available when a caller needs exact request control:
+
+```python
+from lean_client import AsyncKiminaClient, ExecCreateStateItem
+
+async with AsyncKiminaClient(api_url="http://localhost:8000") as client:
+    response = await client.exec_create_states(
+        "default",
+        [
+            ExecCreateStateItem(
+                item_id="attempt-1",
+                code="theorem t : True := by\n  sorry",
+            )
+        ],
+    )
+```
+
+Prefer the backend facade unless you are building a new adapter layer.
+
+## Programmatic Server Launch
+
+The supported production deployment runs the server as its own process: a Docker
+container or `python -m server` from a server checkout. The helper below is a
+development convenience for jobs that need to spawn a local server process while
+keeping the downstream repo independent of server imports.
 
 ```python
 from lean_client import ExecServerConfig, launch_server
@@ -101,38 +103,45 @@ cfg = ExecServerConfig(
     host="127.0.0.1",
     port=8000,
     workers=8,
-    state_store_dir="/tmp/leanfoundry-state",
+    state_store_dir="/tmp/kimina-lean-state",
 )
 process = launch_server(cfg, server_python="/path/to/server/.venv/bin/python")
 ```
 
-`launch_server` builds:
+`launch_server` builds a command like:
 
 ```sh
 python -m server --host 127.0.0.1 --port 8000 --workers 8 ...
 ```
 
-The client package does not import the server package. `server_python` must point
-at an environment where the server checkout can run `python -m server`.
+The `server_python` interpreter must be able to run the server checkout. In
+production, pass a deployed server URL to the client instead of launching the
+server from the consumer repo.
 
-Important safety defaults in `ExecServerConfig`:
+Important launch defaults:
 
-- `workers`: total Pantograph Lean worker processes.
-- `max_lean_processes_per_env_profile`: defaults to `workers`.
-- `recommended_items_per_step_batch`: defaults to `workers`.
-- `max_in_flight_exec_requests`: defaults to `8`.
-- `max_queued_exec_requests`: defaults to `32`.
-- `max_state_store_bytes`: defaults to `16 * 2**30`.
-- `single_process`: defaults to `True`; do not run multiple server processes
-  against one `state_store_dir`.
+- `workers` controls `LEAN_SERVER_MAX_PANTOGRAPH_WORKERS`.
+- `max_lean_processes_per_env_profile` defaults to `workers`.
+- `recommended_items_per_step_batch` defaults to `workers`.
+- `max_in_flight_exec_requests` defaults to `8`.
+- `max_queued_exec_requests` defaults to `32`.
+- `max_state_store_bytes` defaults to `16 * 2**30`.
+- `single_process` defaults to `True`.
 
-Setting any bounded cap to `-1` requires `allow_unbounded_exec=True`.
+Setting any bounded exec cap to `-1` requires `allow_unbounded_exec=True`.
 
-## Legacy verification path
+## Legacy Verify-Mode Client
+
+`KiminaClient.check(...)` talks to the legacy whole-code checking API. It only
+works against a server started with `LEAN_SERVER_MODE=verify`; the default
+exec-mode server does not mount `/api/check` or `/verify`.
 
 ```python
 from lean_client import KiminaClient
 
-client = KiminaClient()
+client = KiminaClient(api_url="http://localhost:8000")
 client.check("#check Nat")
 ```
+
+Use this path for compatibility with older checking workflows, not for
+search-time proof-state execution.

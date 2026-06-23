@@ -99,3 +99,50 @@ def test_python_module_cli_mode_maps_to_settings() -> None:
 
     assert config.workers >= 1
     assert settings.mode == "verify"
+
+
+def test_python_module_settings_preserve_env_without_cli_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEAN_SERVER_MAX_PANTOGRAPH_WORKERS", "2")
+    monkeypatch.setenv("LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE", "2")
+    monkeypatch.setenv("LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH", "2")
+    monkeypatch.setenv("LEAN_SERVER_MAX_IN_FLIGHT_EXEC_REQUESTS", "3")
+    monkeypatch.setenv("LEAN_SERVER_MAX_QUEUED_EXEC_REQUESTS", "9")
+    monkeypatch.setenv("LEAN_SERVER_MAX_STATE_STORE_BYTES", "4096")
+
+    settings = settings_from_cli_args([])
+
+    assert settings.max_pantograph_workers == 2
+    assert settings.max_lean_processes_per_env_profile == 2
+    assert settings.recommended_items_per_step_batch == 2
+    assert settings.max_in_flight_exec_requests == 3
+    assert settings.max_queued_exec_requests == 9
+    assert settings.max_state_store_bytes == 4096
+
+
+def test_python_module_cli_overrides_only_requested_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEAN_SERVER_MAX_PANTOGRAPH_WORKERS", "2")
+    monkeypatch.setenv("LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH", "2")
+
+    settings = settings_from_cli_args(["--port", "8123"])
+
+    assert settings.port == 8123
+    assert settings.max_pantograph_workers == 2
+    assert settings.recommended_items_per_step_batch == 2
+
+
+def test_python_module_cli_workers_updates_dependent_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEAN_SERVER_MAX_PANTOGRAPH_WORKERS", "2")
+    monkeypatch.setenv("LEAN_SERVER_MAX_LEAN_PROCESSES_PER_ENV_PROFILE", "2")
+    monkeypatch.setenv("LEAN_SERVER_RECOMMENDED_ITEMS_PER_STEP_BATCH", "2")
+
+    settings = settings_from_cli_args(["--workers", "6"])
+
+    assert settings.max_pantograph_workers == 6
+    assert settings.max_lean_processes_per_env_profile == 6
+    assert settings.recommended_items_per_step_batch == 6

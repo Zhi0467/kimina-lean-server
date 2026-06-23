@@ -4,6 +4,7 @@ ARG APP_VERSION=2.0.0
 ARG LEAN_SERVER_LEAN_VERSION=v4.29.1
 ARG REPL_REPO_URL=https://github.com/FrederickPu/repl.git
 ARG REPL_BRANCH=lean415compat
+ARG SETUP_REPL=0
 ARG MATHLIB_REPO_URL=https://github.com/leanprover-community/mathlib4.git
 ARG MATHLIB_BRANCH=${LEAN_SERVER_LEAN_VERSION}
 
@@ -46,9 +47,9 @@ COPY prisma prisma
 COPY pyproject.toml uv.lock README.md ./
 
 RUN uv sync --frozen --no-dev \
- && uv run prisma generate
+ && uv run --frozen --no-dev prisma generate
 
 EXPOSE ${LEAN_SERVER_PORT}
 
 
-CMD ["uv", "run", "python", "-m", "server"]
+CMD [".venv/bin/python", "-m", "server"]
