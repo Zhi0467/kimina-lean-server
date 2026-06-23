@@ -2867,19 +2867,25 @@ The **Docker image is the prioritized deployment path** for both dev and
 release: it seals the expensive part (Lean toolchain via `setup.sh` + the
 Mathlib build + the server's own venv) and exposes only an HTTP port, so the
 consumer's environment needs nothing but the `lean-client` package. The
-`Dockerfile` already defaults `LEAN_SERVER_MODE=exec` and `CMD python -m server`;
-`compose.yaml` runs it. The real cost of standing up a server is the Lean/Mathlib
-build, never Python packaging — which is exactly why it should never live inside
-the consumer process.
+`Dockerfile` defaults `LEAN_SERVER_MODE=exec` and starts the built virtualenv
+with `.venv/bin/python -m server`. The real cost of standing up a server is the
+Lean/Mathlib build, never Python packaging — which is exactly why it should
+never live inside the consumer process.
 
 Three ways to run the server, ranked:
 
 ```
 1. Docker image (preferred, dev + release):
-     docker run -e LEAN_SERVER_MODE=exec -e LEAN_SERVER_MAX_REPLS=8 \
-       -p 8000:8000 projectnumina/kimina-lean-server:<tag>     # or: docker compose up
+     docker run --rm --name kimina-lean-server \
+       -p 8000:8000 \
+       zzzzhi/kimina-lean-server:latest
    Consumer venv holds only lean-client; zero shared environment.
-   Release: pin the image by infra SHA + env_profile.
+   Release: pin the image by immutable commit tag, for example
+   zzzzhi/kimina-lean-server:9820b9a, plus env_profile.
+
+   A host process outside the container connects to http://127.0.0.1:8000.
+   Another container on the same Docker network connects to the service or
+   container DNS name, for example http://server:8000.
 
 2. Server checkout with its own venv (when Docker is unavailable):
      uv sync --dev && uv run python -m server --workers 8 --port 8000
@@ -2894,12 +2900,13 @@ Three ways to run the server, ranked:
    stable consumer contract.
 ```
 
-> **Current local state (2026-06-17):** only the `Dockerfile` exists in-repo —
-> there is no pre-built image, and Docker is not installed on the dev machine.
-> So local work uses option 2 (`uv run python -m server` from this checkout);
-> building/pulling the image is the first step before treating Docker as the
-> default. The consumer always reaches the server over HTTP regardless of which
-> option launched it.
+> **Current local state (2026-06-23):** the server image has been built,
+> smoke-tested, and pushed to Docker Hub as
+> `zzzzhi/kimina-lean-server:latest` and `zzzzhi/kimina-lean-server:9820b9a`.
+> The smoke test covered `/health`, `/exec/limits`, `/exec/create_states`, and
+> `/exec/step_batch`, including a host-side `lean-client` process talking to the
+> container through `http://127.0.0.1:8000`. The consumer always reaches the
+> server over HTTP regardless of which option launched it.
 
 In all cases the training repo depends on `lean-client` (from
 `packages/lean-client`, pinned by git SHA/tag) as its only Python import from

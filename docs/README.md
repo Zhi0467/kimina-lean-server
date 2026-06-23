@@ -1,7 +1,8 @@
 # Documentation Index
 
-Start with the root [README](../README.md) for setup, Docker packaging, runtime
-configuration, and smoke tests. Start with [README-client](../README-client.md)
+Start with the root [README](../README.md) for the server application: Docker
+Hub image pulls, local image builds, runtime configuration, host/container
+networking, and smoke tests. Start with [README-client](../README-client.md)
 when integrating the packaged `lean-client` dependency into another repo.
 
 The running FastAPI app serves API documentation at:
@@ -43,8 +44,14 @@ The running FastAPI app serves API documentation at:
 
 This fork should be read as two deliverables:
 
-- a Dockerized server application from the repository root;
-- the `lean-client` Python package from `packages/lean-client/`.
+- a Dockerized server application published as
+  `zzzzhi/kimina-lean-server:latest`, with immutable commit tags for
+  reproducible jobs;
+- the `lean-client` Python package from `packages/lean-client/`, installed by
+  downstream repos and pointed at a running server URL.
 
 Do not point downstream projects at server internals. They should depend on the
-client package and connect to a separately launched server URL.
+client package and connect to a separately launched server URL. For a host
+process talking to a local Docker container, that URL is normally
+`http://127.0.0.1:8000`; for another container on the same Docker network, use
+the service or container DNS name such as `http://server:8000`.

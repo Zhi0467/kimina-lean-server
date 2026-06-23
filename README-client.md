@@ -22,6 +22,40 @@ lean-client = { git = "https://github.com/Zhi0467/kimina-lean-server", subdirect
 Use a pinned commit or tag. The root repo is a development workspace; the
 subdirectory is the package boundary.
 
+## Connect To A Server
+
+The client does not start or import the server by default. Point it at a running
+server URL.
+
+For a normal host process talking to the published Docker image on the same
+machine:
+
+```sh
+docker run --rm \
+  --name kimina-lean-server \
+  -p 8000:8000 \
+  zzzzhi/kimina-lean-server:latest
+```
+
+```python
+api_url = "http://127.0.0.1:8000"
+```
+
+Use `zzzzhi/kimina-lean-server:latest` for the current published image and an
+immutable commit tag, such as `zzzzhi/kimina-lean-server:9820b9a`, for
+reproducible runs.
+
+URL rules:
+
+- host process to local Docker container: `http://127.0.0.1:8000`
+- another container on the same Docker network: `http://server:8000`, replacing
+  `server` with the Compose service or container DNS name
+- another machine: `http://<reachable-host-or-ip>:<published-port>`
+
+Read `GET /exec/limits` at startup, or let `AsyncLeanExecBackend.connect(...)`
+do it, so the caller sizes batch width and in-flight work from the server that
+is actually running.
+
 ## Exec Backend
 
 Use `AsyncLeanExecBackend` for proof-state search. It owns:

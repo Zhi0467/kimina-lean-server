@@ -49,7 +49,27 @@ to prevent two server processes from sharing one local state store.
 
 ## Docker Server Image
 
-Build the server image from this checkout:
+Use the published server image when you only need to run the server:
+
+```sh
+docker pull zzzzhi/kimina-lean-server:latest
+docker pull zzzzhi/kimina-lean-server:9820b9a
+```
+
+`latest` is the moving Docker Hub tag for the current published server image.
+Use an immutable commit tag, such as `9820b9a`, for reproducible jobs.
+
+Run the published exec-mode server:
+
+```sh
+docker run --rm \
+  --name kimina-lean-server \
+  -p 8000:8000 \
+  zzzzhi/kimina-lean-server:latest
+```
+
+Build a local server image from this checkout when you are testing local source
+changes:
 
 ```sh
 docker build -t kimina-lean-server:local .
@@ -63,7 +83,7 @@ default image is for `exec` mode. Build the REPL only for a verify-mode image:
 docker build --build-arg SETUP_REPL=1 -t kimina-lean-server:verify .
 ```
 
-Run a small exec-mode server:
+Run a small local exec-mode server when sharing the host with other jobs:
 
 ```sh
 docker run --rm \
@@ -75,11 +95,19 @@ docker run --rm \
   kimina-lean-server:local
 ```
 
+Without explicit caps, the exec server sizes itself from CPU count and a
+conservative free-node memory budget. On this 256-CPU, 755 GiB node, that
+default sized to 60 Pantograph workers, 60 Lean processes per env profile, 8
+admitted exec requests, and 32 queued exec requests. Override the worker
+variables when a shared node needs a smaller footprint.
+
 The app binds `0.0.0.0` inside the container. Docker `-p 8000:8000` publishes
 container port `8000` to host port `8000`, so a process on the same host, such
 as a LeanFoundry search engine outside the container, should connect to
 `http://127.0.0.1:8000`. A process on another machine must use the node's
-reachable host/IP and whatever firewall or scheduler port publishing applies.
+reachable host/IP and whatever firewall or scheduler port publishing applies. A
+client running in another container on the same Docker network should use the
+server container or Compose service name, for example `http://server:8000`.
 
 Smoke-test the running container:
 
@@ -188,7 +216,7 @@ async with await AsyncLeanExecBackend.connect(
 ```
 
 See [README-client.md](./README-client.md) for the client boundary, launch
-helper, and legacy verify-mode notes.
+helper, server URL patterns, and legacy verify-mode notes.
 
 ## Tests
 
